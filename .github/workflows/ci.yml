@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: Go
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "$out"
+            echo "::error::gofmt found issues; run 'gofmt -w .'"
+            exit 1
+          fi
+
+      - name: go mod tidy
+        run: go mod tidy -diff
+
+      - run: go mod verify
+
+      - run: go vet ./...
+
+      - run: go test -race ./...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: latest
+
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+      - name: actionlint
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@latest
+          actionlint
+
+      - name: Build
+        run: go build -trimpath ./...
+
+  app:
+    name: App
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: swift format
+        run: swift format lint --strict --recursive --configuration .swift-format app/Sources app/Tests
+
+      - name: Swift tests
+        run: swift test --package-path app
+
+      - name: Build bundle
+        run: VERSION=0.0.0-dev-${GITHUB_SHA::7} make app
+
+      - name: Verify bundle
+        run: make verify-app
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Awsssh-dev-${{ github.sha }}
+          path: dist/*.zip
+          retention-days: 14

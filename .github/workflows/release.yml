@@ -1,0 +1,67 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to (re)build, e.g. v0.1.0"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Resolve version and Xcode
+        id: ctx
+        run: |
+          REF="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "tag=$REF" >> "$GITHUB_OUTPUT"
+          echo "version=${REF#v}" >> "$GITHUB_OUTPUT"
+          echo "Using $(xcode-select -p)"
+          xcodebuild -version
+
+      - name: Build Awsssh.app (universal, ad-hoc signed)
+        id: build
+        run: |
+          VERSION="${{ steps.ctx.outputs.version }}"
+          VERSION="$VERSION" make app
+          ZIP="dist/Awsssh-$VERSION.zip"
+          SHA="$(shasum -a 256 "$ZIP" | awk '{print $1}')"
+          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          make verify-app
+          {
+            echo "### Awsssh ${{ steps.ctx.outputs.tag }}"
+            echo ""
+            echo "Bump \`Casks/awsssh.rb\` in sratabix/homebrew-taps to:"
+            echo ""
+            echo "| stanza | value |"
+            echo "| --- | --- |"
+            echo "| \`version\` | \`${{ steps.ctx.outputs.version }}\` |"
+            echo "| \`sha256\` | \`$SHA\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.ctx.outputs.tag }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${{ steps.build.outputs.zip }}" --clobber
+          else
+            gh release create "$TAG" "${{ steps.build.outputs.zip }}" \
+              --title "$TAG" --generate-notes
+          fi
