@@ -21,7 +21,7 @@ let package = Package(
         ),
         .testTarget(
             name: "AwssshAppTests",
-            dependencies: ["AwssshApp"],
+            dependencies: ["AwssshApp", "AwssshIcon"],
             path: "Tests/AwssshAppTests"
         ),
     ]

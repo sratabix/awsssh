@@ -454,4 +454,237 @@ final class AppModelTests: XCTestCase {
     @MainActor func testStateForAnUnknownForwardIsStopped() {
         XCTAssertEqual(model().state(for: forward(123)).run, .stopped)
     }
+
+    @MainActor func testStartedStampsTheUptimeClock() throws {
+        let m = model()
+        m.handle(HelperMessage(event: "started", id: 1, detail: "localhost:5432"))
+
+        let state = try XCTUnwrap(m.states[1])
+        let since = try XCTUnwrap(state.since)
+        XCTAssertEqual(state.uptime(at: since.addingTimeInterval(65)), "1m 5s")
+    }
+
+    @MainActor func testStoppingClearsTheUptimeClock() {
+        let m = model()
+        m.handle(HelperMessage(event: "started", id: 1))
+        m.handle(HelperMessage(event: "exited", id: 1))
+
+        XCTAssertNil(m.states[1]?.since)
+        XCTAssertNil(m.states[1]?.uptime(at: Date()))
+    }
+
+    @MainActor func testUptimeIsOnlyReportedWhileRunning() {
+        var s = EntryState()
+        s.since = Date()
+        s.run = .reconnecting
+        XCTAssertNil(s.uptime(at: Date().addingTimeInterval(30)))
+    }
+
+    @MainActor func testWakeMovesRunningForwardsToReconnecting() {
+        let m = model()
+        m.saveForm(forward(1, port: "5432", name: "live"))
+        m.saveForm(forward(2, port: "5433", name: "idle"))
+        m.handle(HelperMessage(event: "started", id: 1, detail: "localhost:5432"))
+
+        m.reconnectLiveForwards(reason: .sleep)
+
+        XCTAssertEqual(m.states[1]?.run, .reconnecting)
+        XCTAssertNil(m.states[1]?.since, "the clock restarts with the tunnel")
+        XCTAssertEqual(m.states[1]?.detail, "after sleep")
+        XCTAssertNil(m.states[2]?.run, "a stopped forward must not be woken")
+        XCTAssertEqual(m.runningCount, 0, "reconnecting is not running")
+    }
+
+    @MainActor func testReconnectRestartsOnTheExitItAskedFor() {
+        let m = model()
+        m.saveForm(forward(1, name: "live"))
+        m.handle(HelperMessage(event: "started", id: 1))
+        m.reconnectLiveForwards(reason: .sleep)
+
+        m.handle(HelperMessage(event: "exited", id: 1))
+        XCTAssertEqual(m.states[1]?.run, .reconnecting, "the exit is the handshake, not a stop")
+
+        m.handle(HelperMessage(event: "started", id: 1, detail: "localhost:5432"))
+        XCTAssertEqual(m.states[1]?.run, .running)
+        XCTAssertNotNil(m.states[1]?.since)
+    }
+
+    @MainActor func testAFailedReconnectSurfacesAsAnErrorAndDoesNotLoop() {
+        let m = model()
+        m.saveForm(forward(1, name: "live"))
+        m.handle(HelperMessage(event: "started", id: 1))
+        m.reconnectLiveForwards(reason: .sleep)
+
+        m.handle(HelperMessage(event: "exited", id: 1))
+        m.handle(HelperMessage(event: "exited", id: 1, error: "not signed in"))
+
+        XCTAssertEqual(m.states[1]?.run, .error)
+        XCTAssertEqual(m.states[1]?.error, "not signed in")
+    }
+
+    @MainActor func testStoppingDuringAReconnectCancelsTheRestart() {
+        let m = model()
+        m.saveForm(forward(1, name: "live"))
+        m.handle(HelperMessage(event: "started", id: 1))
+        m.reconnectLiveForwards(reason: .sleep)
+
+        m.toggle(m.forwards[0])
+        XCTAssertEqual(m.states[1]?.run, .stopping)
+
+        m.handle(HelperMessage(event: "exited", id: 1))
+        XCTAssertEqual(m.states[1]?.run, .stopped, "the cancelled restart must not fire")
+    }
+
+    @MainActor func testReconnectingHoldsTheLocalPort() {
+        let m = model()
+        m.saveForm(forward(1, port: "5432"))
+        m.handle(HelperMessage(event: "started", id: 1))
+        m.reconnectLiveForwards(reason: .sleep)
+
+        XCTAssertNotNil(
+            m.liveForward(onLocalPort: "5432", excluding: 99),
+            "the plugin still owns the port while it restarts")
+    }
+
+    @MainActor func testReconnectReasonReachesTheStatusLine() {
+        let m = model()
+        m.saveForm(forward(1, name: "live"))
+        m.handle(HelperMessage(event: "started", id: 1))
+
+        m.reconnectLiveForwards(reason: .network)
+        XCTAssertEqual(m.states[1]?.detail, "after a network change")
+    }
+
+    @MainActor func testASecondReconnectWithinTheCooldownIsIgnored() {
+        let m = model()
+        m.saveForm(forward(1, name: "live"))
+        m.handle(HelperMessage(event: "started", id: 1))
+
+        let wake = Date()
+        m.reconnectLiveForwards(reason: .sleep, now: wake)
+        m.handle(HelperMessage(event: "exited", id: 1))
+        m.handle(HelperMessage(event: "started", id: 1))
+
+        m.reconnectLiveForwards(reason: .network, now: wake.addingTimeInterval(3))
+
+        XCTAssertEqual(
+            m.states[1]?.run, .running,
+            "the path settling after a wake must not restart what the wake already restarted")
+    }
+
+    @MainActor func testAReconnectAfterTheCooldownIsAllowed() {
+        let m = model()
+        m.saveForm(forward(1, name: "live"))
+        m.handle(HelperMessage(event: "started", id: 1))
+
+        let first = Date()
+        m.reconnectLiveForwards(reason: .sleep, now: first)
+        m.handle(HelperMessage(event: "exited", id: 1))
+        m.handle(HelperMessage(event: "started", id: 1))
+
+        m.reconnectLiveForwards(
+            reason: .network,
+            now: first.addingTimeInterval(AppModel.reconnectCooldown + 1))
+
+        XCTAssertEqual(m.states[1]?.run, .reconnecting)
+    }
+
+    @MainActor func testAReconnectWithNothingRunningDoesNotArmTheCooldown() {
+        let m = model()
+        m.saveForm(forward(1, name: "live"))
+
+        let idle = Date()
+        m.reconnectLiveForwards(reason: .network, now: idle)
+        m.handle(HelperMessage(event: "started", id: 1))
+        m.reconnectLiveForwards(reason: .network, now: idle.addingTimeInterval(1))
+
+        XCTAssertEqual(
+            m.states[1]?.run, .reconnecting,
+            "a no-op reconnect must not block the next real one")
+    }
+
+    @MainActor func testNothingRunningNeedsNoAttention() {
+        let m = model()
+        m.saveForm(forward(1))
+        XCTAssertFalse(m.needsAttention)
+    }
+
+    @MainActor func testAHealthyForwardNeedsNoAttention() {
+        let m = model()
+        m.saveForm(forward(1))
+        m.handle(HelperMessage(event: "started", id: 1))
+        XCTAssertFalse(m.needsAttention, "running is the happy path")
+    }
+
+    @MainActor func testStartingAndStoppingNeedNoAttention() {
+        let m = model()
+        m.saveForm(forward(1))
+
+        m.toggle(m.forwards[0])
+        XCTAssertEqual(m.states[1]?.run, .starting)
+        XCTAssertFalse(m.needsAttention, "the user asked for this one")
+
+        m.handle(HelperMessage(event: "started", id: 1))
+        m.toggle(m.forwards[0])
+        XCTAssertEqual(m.states[1]?.run, .stopping)
+        XCTAssertFalse(m.needsAttention, "the user asked for this one too")
+    }
+
+    @MainActor func testReconnectingNeedsAttention() {
+        let m = model()
+        m.saveForm(forward(1))
+        m.handle(HelperMessage(event: "started", id: 1))
+
+        m.reconnectLiveForwards(reason: .network)
+        XCTAssertTrue(m.needsAttention)
+    }
+
+    @MainActor func testAnErrorNeedsAttention() {
+        let m = model()
+        m.saveForm(forward(1))
+        m.handle(HelperMessage(event: "exited", id: 1, error: "not signed in"))
+        XCTAssertTrue(m.needsAttention)
+    }
+
+    @MainActor func testAttentionClearsWhenTheReconnectSucceeds() {
+        let m = model()
+        m.saveForm(forward(1))
+        m.handle(HelperMessage(event: "started", id: 1))
+        m.reconnectLiveForwards(reason: .sleep)
+        XCTAssertTrue(m.needsAttention)
+
+        m.handle(HelperMessage(event: "exited", id: 1))
+        m.handle(HelperMessage(event: "started", id: 1))
+        XCTAssertFalse(m.needsAttention, "the badge must not outlive the problem")
+    }
+
+    @MainActor func testAnOrphanedStateDoesNotStickTheBadgeOn() {
+        let m = model()
+        m.handle(HelperMessage(event: "exited", id: 77, error: "boom"))
+
+        XCTAssertFalse(
+            m.needsAttention,
+            "a state with no forward behind it would badge the menubar forever")
+    }
+
+    @MainActor func testDeletingTheBrokenForwardClearsTheBadge() {
+        let m = model()
+        m.saveForm(forward(1))
+        m.handle(HelperMessage(event: "exited", id: 1, error: "boom"))
+        XCTAssertTrue(m.needsAttention)
+
+        m.delete(m.forwards[0])
+        XCTAssertFalse(m.needsAttention)
+    }
+
+    @MainActor func testUptimeLabelBuckets() {
+        XCTAssertEqual(EntryState.uptimeLabel(0), "0s")
+        XCTAssertEqual(EntryState.uptimeLabel(-5), "0s")
+        XCTAssertEqual(EntryState.uptimeLabel(9.7), "9s")
+        XCTAssertEqual(EntryState.uptimeLabel(59), "59s")
+        XCTAssertEqual(EntryState.uptimeLabel(60), "1m 0s")
+        XCTAssertEqual(EntryState.uptimeLabel(3599), "59m 59s")
+        XCTAssertEqual(EntryState.uptimeLabel(3600), "1h 0m")
+        XCTAssertEqual(EntryState.uptimeLabel(7_500), "2h 5m")
+    }
 }

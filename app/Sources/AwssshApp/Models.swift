@@ -47,12 +47,33 @@ struct Forward: Identifiable, Codable, Equatable {
     }
 }
 
+enum ReconnectReason: String {
+    case sleep = "after sleep"
+    case network = "after a network change"
+}
+
 enum RunState: Equatable {
-    case stopped, starting, running, stopping, error
+    case stopped, starting, running, reconnecting, stopping, error
 }
 
 struct EntryState: Equatable {
     var run: RunState = .stopped
     var detail: String = ""
     var error: String = ""
+    var since: Date?
+
+    func uptime(at now: Date) -> String? {
+        guard run == .running, let since else { return nil }
+        return EntryState.uptimeLabel(now.timeIntervalSince(since))
+    }
+
+    static func uptimeLabel(_ seconds: TimeInterval) -> String {
+        let total = Int(seconds.rounded(.down))
+        guard total > 0 else { return "0s" }
+        let hours = total / 3600
+        let minutes = (total % 3600) / 60
+        if hours > 0 { return "\(hours)h \(minutes)m" }
+        if minutes > 0 { return "\(minutes)m \(total % 60)s" }
+        return "\(total)s"
+    }
 }

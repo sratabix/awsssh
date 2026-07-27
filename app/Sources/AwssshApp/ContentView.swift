@@ -130,14 +130,14 @@ struct ForwardRow: View {
                             .background(.quaternary, in: RoundedRectangle(cornerRadius: 3))
                     }
                 }
-                Text(status(s)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                statusLine(s)
             }
             Spacer()
             Button(action: { model.toggle(forward) }) {
                 Image(systemName: buttonIcon(s.run))
             }
             .buttonStyle(.borderless)
-            .help(s.run == .running ? "Stop" : "Start")
+            .help(buttonIcon(s.run) == "stop.circle" ? "Stop" : "Start")
             Button(action: { model.beginEdit(forward) }) {
                 Image(systemName: "pencil")
             }
@@ -150,10 +150,23 @@ struct ForwardRow: View {
         .padding(.vertical, 3)
     }
 
+    @ViewBuilder private func statusLine(_ s: EntryState) -> some View {
+        if s.run == .running, let since = s.since {
+            TimelineView(.periodic(from: since, by: 1)) { context in
+                Text(status(s, at: context.date))
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+        } else {
+            Text(status(s, at: Date()))
+                .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+        }
+    }
+
     private func color(for run: RunState) -> Color {
         switch run {
         case .running: return .green
         case .starting, .stopping: return .yellow
+        case .reconnecting: return .orange
         case .error: return .red
         case .stopped: return .secondary
         }
@@ -161,15 +174,22 @@ struct ForwardRow: View {
 
     private func buttonIcon(_ run: RunState) -> String {
         switch run {
-        case .running, .starting: return "stop.circle"
+        case .running, .starting, .reconnecting: return "stop.circle"
         default: return "play.circle"
         }
     }
 
-    private func status(_ s: EntryState) -> String {
+    private func status(_ s: EntryState, at now: Date) -> String {
         switch s.run {
-        case .running: return s.detail.isEmpty ? "running" : "running · \(s.detail)"
+        case .running:
+            return
+                ["running", s.detail, s.uptime(at: now).map { "up \($0)" }]
+                .compactMap { $0 }
+                .filter { !$0.isEmpty }
+                .joined(separator: " · ")
         case .starting: return "starting…"
+        case .reconnecting:
+            return s.detail.isEmpty ? "reconnecting…" : "reconnecting \(s.detail)…"
         case .stopping: return "stopping…"
         case .error: return s.error
         case .stopped: return forward.route

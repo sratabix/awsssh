@@ -9,7 +9,7 @@ struct AwssshApp: App {
         MenuBarExtra {
             ContentView().environmentObject(model)
         } label: {
-            Image(systemName: AppIcon.symbolName)
+            Image(nsImage: AppIcon.menuBar(attention: model.needsAttention))
         }
         .menuBarExtraStyle(.window)
     }

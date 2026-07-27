@@ -3,6 +3,8 @@ import AppKit
 
 @MainActor
 final class AppModel: ObservableObject {
+    static let reconnectCooldown: TimeInterval = 15
+
     @Published var forwards: [Forward] = []
     @Published var states: [Int: EntryState] = [:]
     @Published var profiles: [String] = []
@@ -20,6 +22,10 @@ final class AppModel: ObservableObject {
     private let attached: Bool
     private var nextID = 1
     private var stamp: Date?
+    private var awaitingRestart: Set<Int> = []
+    private var wakeObserver: NSObjectProtocol?
+    private let network = NetworkMonitor()
+    private var lastReconnect: Date?
 
     init(attached: Bool = true) {
         self.attached = attached
@@ -42,6 +48,23 @@ final class AppModel: ObservableObject {
         }
         HotKeyCenter.shared.sync(forwards)
         updates.start()
+
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.reconnectLiveForwards(reason: .sleep) }
+        }
+
+        network.onChange = { [weak self] in self?.reconnectLiveForwards(reason: .network) }
+        network.start()
+    }
+
+    deinit {
+        if let wakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
+        }
     }
 
     private func syncHotKeys() {
@@ -56,12 +79,23 @@ final class AppModel: ObservableObject {
 
     var runningCount: Int { states.values.filter { $0.run == .running }.count }
 
+    var needsAttention: Bool {
+        let live = Set(forwards.map(\.id))
+        return states.contains { id, state in
+            live.contains(id) && (state.run == .reconnecting || state.run == .error)
+        }
+    }
+
     func state(for forward: Forward) -> EntryState { states[forward.id] ?? EntryState() }
 
     func toggle(_ forward: Forward) {
         switch state(for: forward).run {
-        case .running, .starting:
-            update(forward.id) { $0.run = .stopping }
+        case .running, .starting, .reconnecting:
+            awaitingRestart.remove(forward.id)
+            update(forward.id) {
+                $0.run = .stopping
+                $0.since = nil
+            }
             helper.send(HelperCommand(cmd: "stop", id: forward.id))
         case .stopping:
             break
@@ -83,20 +117,44 @@ final class AppModel: ObservableObject {
             update(forward.id) {
                 $0.run = .starting
                 $0.error = ""
+                $0.since = nil
             }
-            helper.send(
-                HelperCommand(
-                    cmd: "start",
-                    id: forward.id,
-                    forward: HelperForward(
-                        profile: forward.profile,
-                        region: forward.region,
-                        instance: forward.instance,
-                        local: forward.localPort,
-                        host: forward.host,
-                        remote: forward.remotePort
-                    )
-                ))
+            sendStart(forward)
+        }
+    }
+
+    private func sendStart(_ forward: Forward) {
+        helper.send(
+            HelperCommand(
+                cmd: "start",
+                id: forward.id,
+                forward: HelperForward(
+                    profile: forward.profile,
+                    region: forward.region,
+                    instance: forward.instance,
+                    local: forward.localPort,
+                    host: forward.host,
+                    remote: forward.remotePort
+                )
+            ))
+    }
+
+    func reconnectLiveForwards(reason: ReconnectReason, now: Date = Date()) {
+        if let lastReconnect, now.timeIntervalSince(lastReconnect) < Self.reconnectCooldown { return }
+
+        let live = forwards.filter { state(for: $0).run == .running }
+        guard !live.isEmpty else { return }
+        lastReconnect = now
+
+        for forward in live {
+            awaitingRestart.insert(forward.id)
+            update(forward.id) {
+                $0.run = .reconnecting
+                $0.detail = reason.rawValue
+                $0.error = ""
+                $0.since = nil
+            }
+            helper.send(HelperCommand(cmd: "stop", id: forward.id))
         }
     }
 
@@ -152,6 +210,7 @@ final class AppModel: ObservableObject {
     }
 
     func delete(_ forward: Forward) {
+        awaitingRestart.remove(forward.id)
         helper.send(HelperCommand(cmd: "stop", id: forward.id))
         forwards.removeAll { $0.id == forward.id }
         states[forward.id] = nil
@@ -196,7 +255,7 @@ final class AppModel: ObservableObject {
         forwards.first { f in
             guard f.id != id, f.localPort == localPort else { return false }
             switch state(for: f).run {
-            case .starting, .running, .stopping: return true
+            case .starting, .running, .reconnecting, .stopping: return true
             case .stopped, .error: return false
             }
         }
@@ -212,23 +271,33 @@ final class AppModel: ObservableObject {
         switch msg.event {
         case "started":
             if let id = msg.id {
+                awaitingRestart.remove(id)
                 update(id) {
                     $0.run = .running
                     $0.detail = msg.detail ?? ""
                     $0.error = ""
+                    $0.since = Date()
                 }
             }
         case "exited":
             if let id = msg.id {
+                if awaitingRestart.remove(id) != nil,
+                    let forward = forwards.first(where: { $0.id == id })
+                {
+                    sendStart(forward)
+                    return
+                }
                 if let e = msg.error, !e.isEmpty {
                     update(id) {
                         $0.run = .error
                         $0.error = e
+                        $0.since = nil
                     }
                 } else {
                     update(id) {
                         $0.run = .stopped
                         $0.detail = ""
+                        $0.since = nil
                     }
                 }
             }
