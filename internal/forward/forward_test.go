@@ -1,6 +1,9 @@
 package forward
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -141,6 +144,29 @@ func TestManagerReleasesTheIDAfterFailure(t *testing.T) {
 	mgr.mu.Unlock()
 	if stillTracked {
 		t.Error("a finished forward must not stay in the cancel map")
+	}
+}
+
+func TestExitEventDropsACancellation(t *testing.T) {
+	wrapped := fmt.Errorf("operation error SSM: StartSession: %w", context.Canceled)
+
+	ev := exitEvent(4, wrapped)
+	if ev.Kind != Exited || ev.ID != 4 {
+		t.Fatalf("got %+v", ev)
+	}
+	if ev.Err != "" {
+		t.Errorf("a stop the user asked for must not surface as an error, got: %q", ev.Err)
+	}
+}
+
+func TestExitEventKeepsARealError(t *testing.T) {
+	ev := exitEvent(5, errors.New("AWS profile \"ghost\" does not exist"))
+	if !strings.Contains(ev.Err, "does not exist") {
+		t.Errorf("event err = %q, want the real failure", ev.Err)
+	}
+
+	if got := exitEvent(6, nil); got.Err != "" {
+		t.Errorf("a clean exit carries no error, got %q", got.Err)
 	}
 }
 

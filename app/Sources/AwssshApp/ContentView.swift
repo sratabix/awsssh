@@ -116,7 +116,17 @@ struct ForwardRow: View {
 
     private var row: some View {
         let s = model.state(for: forward)
-        return HStack(spacing: 8) {
+        return VStack(alignment: .leading, spacing: 5) {
+            header(s)
+            if s.run == .error, model.expandedError == forward.id {
+                errorDetail(s.error)
+            }
+        }
+        .padding(.vertical, 3)
+    }
+
+    private func header(_ s: EntryState) -> some View {
+        HStack(spacing: 8) {
             Circle().fill(color(for: s.run)).frame(width: 9, height: 9)
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 6) {
@@ -147,11 +157,45 @@ struct ForwardRow: View {
             }
             .buttonStyle(.borderless).help("Delete")
         }
-        .padding(.vertical, 3)
+    }
+
+    private func errorDetail(_ message: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(message)
+                .font(.caption.monospaced())
+                .textSelection(.enabled)
+                .lineLimit(8)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            HStack(spacing: 6) {
+                Spacer()
+                Button("Copy") { model.copyError(message) }
+                    .controlSize(.small)
+                Button("Dismiss") { model.dismissError(forward) }
+                    .controlSize(.small)
+                    .help("Clear the error and the menubar badge")
+            }
+        }
+        .padding(8)
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 5))
     }
 
     @ViewBuilder private func statusLine(_ s: EntryState) -> some View {
-        if s.run == .running, let since = s.since {
+        if s.run == .error {
+            Button(action: { model.toggleErrorDetail(forward.id) }) {
+                HStack(spacing: 3) {
+                    Text(s.error)
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    Image(
+                        systemName: model.expandedError == forward.id
+                            ? "chevron.up" : "chevron.down"
+                    )
+                    .font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+            .buttonStyle(.plain)
+            .help("Show the full message")
+        } else if s.run == .running, let since = s.since {
             TimelineView(.periodic(from: since, by: 1)) { context in
                 Text(status(s, at: context.date))
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)

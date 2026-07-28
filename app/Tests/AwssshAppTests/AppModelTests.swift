@@ -687,4 +687,85 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(EntryState.uptimeLabel(3600), "1h 0m")
         XCTAssertEqual(EntryState.uptimeLabel(7_500), "2h 5m")
     }
+
+    @MainActor func testAStopTheUserAskedForNeverLandsInError() {
+        let m = model()
+        m.saveForm(forward(1))
+        m.handle(HelperMessage(event: "started", id: 1))
+
+        m.toggle(m.forwards[0])
+        m.handle(HelperMessage(event: "exited", id: 1, error: "context canceled"))
+
+        XCTAssertEqual(m.states[1]?.run, .stopped, "the user asked for this teardown")
+        XCTAssertEqual(m.states[1]?.error, "")
+        XCTAssertFalse(m.needsAttention, "the badge must not outlive a deliberate stop")
+    }
+
+    @MainActor func testStoppingClearsAnErrorLeftBehindByAnEarlierRun() {
+        let m = model()
+        m.saveForm(forward(1))
+        m.handle(HelperMessage(event: "exited", id: 1, error: "not signed in"))
+        m.toggle(m.forwards[0])
+        m.handle(HelperMessage(event: "started", id: 1))
+        m.toggle(m.forwards[0])
+        m.handle(HelperMessage(event: "exited", id: 1))
+
+        XCTAssertEqual(m.states[1]?.error, "", "a stale message would reappear on the next failure")
+    }
+
+    @MainActor func testDismissingAnErrorClearsTheBadge() {
+        let m = model()
+        m.saveForm(forward(1))
+        m.handle(HelperMessage(event: "exited", id: 1, error: "not signed in"))
+        XCTAssertTrue(m.needsAttention)
+
+        m.dismissError(m.forwards[0])
+
+        XCTAssertEqual(m.states[1]?.run, .stopped)
+        XCTAssertEqual(m.states[1]?.error, "")
+        XCTAssertFalse(m.needsAttention)
+    }
+
+    @MainActor func testDismissOnlyTouchesAnErroredForward() {
+        let m = model()
+        m.saveForm(forward(1))
+        m.handle(HelperMessage(event: "started", id: 1))
+
+        m.dismissError(m.forwards[0])
+        XCTAssertEqual(m.states[1]?.run, .running, "dismiss is not a stop button")
+    }
+
+    @MainActor func testOnlyOneErrorIsExpandedAtATime() {
+        let m = model()
+        m.toggleErrorDetail(1)
+        XCTAssertEqual(m.expandedError, 1)
+
+        m.toggleErrorDetail(2)
+        XCTAssertEqual(m.expandedError, 2, "a second row replaces the first")
+
+        m.toggleErrorDetail(2)
+        XCTAssertNil(m.expandedError, "the same row collapses")
+    }
+
+    @MainActor func testLeavingTheErrorStateCollapsesTheDetail() {
+        let m = model()
+        m.saveForm(forward(1))
+        m.handle(HelperMessage(event: "exited", id: 1, error: "not signed in"))
+        m.toggleErrorDetail(1)
+
+        m.toggle(m.forwards[0])
+
+        XCTAssertEqual(m.states[1]?.run, .starting)
+        XCTAssertNil(m.expandedError, "a panel about an error that is gone")
+    }
+
+    @MainActor func testDeletingAForwardCollapsesItsDetail() {
+        let m = model()
+        m.saveForm(forward(1))
+        m.handle(HelperMessage(event: "exited", id: 1, error: "boom"))
+        m.toggleErrorDetail(1)
+
+        m.delete(m.forwards[0])
+        XCTAssertNil(m.expandedError)
+    }
 }

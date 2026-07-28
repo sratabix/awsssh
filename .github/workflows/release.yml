@@ -16,6 +16,8 @@ permissions:
 jobs:
   release:
     runs-on: macos-latest
+    env:
+      VT_API_KEY: ${{ secrets.VT_API_KEY }}
     steps:
       - uses: actions/checkout@v7
 
@@ -65,3 +67,41 @@ jobs:
             gh release create "$TAG" "${{ steps.build.outputs.zip }}" \
               --title "$TAG" --generate-notes
           fi
+
+      - name: Scan the release zip with VirusTotal
+        if: env.VT_API_KEY != ''
+        uses: crazy-max/ghaction-virustotal@v5.0.0
+        with:
+          vt_api_key: ${{ secrets.VT_API_KEY }}
+          files: ${{ steps.build.outputs.zip }}
+          request_rate: 4
+          update_release_body: false
+
+      - name: Add the VirusTotal verdict to the release
+        if: env.VT_API_KEY != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.ctx.outputs.tag }}
+          SHA: ${{ steps.build.outputs.sha }}
+        run: |
+          for _ in $(seq 1 15); do
+            VERDICT="$(curl -sS -H "x-apikey: $VT_API_KEY" \
+              "https://www.virustotal.com/api/v3/files/$SHA" \
+              | jq -r '.data.attributes.last_analysis_stats // empty
+                  | "\(.malicious) malicious, \(.suspicious) suspicious, \(.harmless + .undetected) clean"')"
+            [ -n "$VERDICT" ] && break
+            sleep 20
+          done
+
+          gh release view "$TAG" --json body -q .body \
+            | awk '/^### VirusTotal$/{exit} {print}' \
+            | perl -0pe 's/\n+\z/\n/' > body.md
+          {
+            echo ""
+            echo "### VirusTotal"
+            echo ""
+            echo "\`$SHA\` — ${VERDICT:-analysis pending}"
+            echo ""
+            echo "https://www.virustotal.com/gui/file/$SHA"
+          } >> body.md
+          gh release edit "$TAG" --notes-file body.md

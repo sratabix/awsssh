@@ -15,6 +15,7 @@ final class AppModel: ObservableObject {
     @Published var launchAtLogin = LaunchAtLogin.isEnabled
     @Published var launchAtLoginError: String?
     @Published var dataNotice: String?
+    @Published var expandedError: Int?
 
     let updates = UpdateChecker()
 
@@ -87,6 +88,25 @@ final class AppModel: ObservableObject {
     }
 
     func state(for forward: Forward) -> EntryState { states[forward.id] ?? EntryState() }
+
+    func toggleErrorDetail(_ id: Int) {
+        expandedError = expandedError == id ? nil : id
+    }
+
+    func dismissError(_ forward: Forward) {
+        guard state(for: forward).run == .error else { return }
+        update(forward.id) {
+            $0.run = .stopped
+            $0.detail = ""
+            $0.error = ""
+            $0.since = nil
+        }
+    }
+
+    func copyError(_ message: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(message, forType: .string)
+    }
 
     func toggle(_ forward: Forward) {
         switch state(for: forward).run {
@@ -214,6 +234,7 @@ final class AppModel: ObservableObject {
         helper.send(HelperCommand(cmd: "stop", id: forward.id))
         forwards.removeAll { $0.id == forward.id }
         states[forward.id] = nil
+        if expandedError == forward.id { expandedError = nil }
         persist()
         syncHotKeys()
         pendingDelete = nil
@@ -265,6 +286,7 @@ final class AppModel: ObservableObject {
         var s = states[id] ?? EntryState()
         mutate(&s)
         states[id] = s
+        if s.run != .error, expandedError == id { expandedError = nil }
     }
 
     func handle(_ msg: HelperMessage) {
@@ -287,7 +309,8 @@ final class AppModel: ObservableObject {
                     sendStart(forward)
                     return
                 }
-                if let e = msg.error, !e.isEmpty {
+                let requested = states[id]?.run == .stopping
+                if let e = msg.error, !e.isEmpty, !requested {
                     update(id) {
                         $0.run = .error
                         $0.error = e
@@ -297,6 +320,7 @@ final class AppModel: ObservableObject {
                     update(id) {
                         $0.run = .stopped
                         $0.detail = ""
+                        $0.error = ""
                         $0.since = nil
                     }
                 }

@@ -3,6 +3,7 @@ package forward
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -77,12 +78,12 @@ func (m *Manager) Start(id int, s Spec) {
 
 		b, err := m.provider.Get(s.Profile, s.Region)
 		if err != nil {
-			m.emit(Event{ID: id, Kind: Exited, Err: err.Error()})
+			m.emit(exitEvent(id, err))
 			return
 		}
 		target, err := b.Client.LookupRunning(ctx, s.Instance)
 		if err != nil {
-			m.emit(Event{ID: id, Kind: Exited, Err: err.Error()})
+			m.emit(exitEvent(id, err))
 			return
 		}
 		cmd, err := b.Starter.ForwardCommand(ctx, target.InstanceID, session.Forward{
@@ -91,7 +92,7 @@ func (m *Manager) Start(id int, s Spec) {
 			RemotePort: s.RemotePort,
 		})
 		if err != nil {
-			m.emit(Event{ID: id, Kind: Exited, Err: err.Error()})
+			m.emit(exitEvent(id, err))
 			return
 		}
 
@@ -99,7 +100,7 @@ func (m *Manager) Start(id int, s Spec) {
 		cmd.Stdout = io.Discard
 		cmd.Stderr = &errbuf
 		if err := cmd.Start(); err != nil {
-			m.emit(Event{ID: id, Kind: Exited, Err: err.Error()})
+			m.emit(exitEvent(id, err))
 			return
 		}
 		m.emit(Event{ID: id, Kind: Started, Detail: "localhost:" + s.LocalPort})
@@ -113,11 +114,7 @@ func (m *Manager) Start(id int, s Spec) {
 				werr = fmt.Errorf("%s", firstLine(msg))
 			}
 		}
-		ev := Event{ID: id, Kind: Exited}
-		if werr != nil {
-			ev.Err = werr.Error()
-		}
-		m.emit(ev)
+		m.emit(exitEvent(id, werr))
 	}()
 }
 
@@ -142,6 +139,14 @@ func (m *Manager) StopAll() {
 func (m *Manager) Close() {
 	m.StopAll()
 	m.closeOnce.Do(func() { close(m.events) })
+}
+
+func exitEvent(id int, err error) Event {
+	ev := Event{ID: id, Kind: Exited}
+	if err != nil && !errors.Is(err, context.Canceled) {
+		ev.Err = err.Error()
+	}
+	return ev
 }
 
 func (m *Manager) emit(e Event) {
