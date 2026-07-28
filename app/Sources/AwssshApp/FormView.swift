@@ -71,7 +71,9 @@ struct FormView: View {
                         Image(systemName: "chevron.down")
                     }
                     .menuStyle(.borderlessButton)
-                    .frame(width: 26)
+                    .menuIndicator(.hidden)
+                    .frame(width: 18)
+                    .help("Pick from ~/.aws/config")
                 }
             }
         }

@@ -1,11 +1,9 @@
 package forward
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"strings"
 	"sync"
 
@@ -96,9 +94,9 @@ func (m *Manager) Start(id int, s Spec) {
 			return
 		}
 
-		var errbuf bytes.Buffer
-		cmd.Stdout = io.Discard
-		cmd.Stderr = &errbuf
+		out, errs := newTailBuffer(tailBytes), newTailBuffer(tailBytes)
+		cmd.Stdout = out
+		cmd.Stderr = errs
 		if err := cmd.Start(); err != nil {
 			m.emit(exitEvent(id, err))
 			return
@@ -106,15 +104,11 @@ func (m *Manager) Start(id int, s Spec) {
 		m.emit(Event{ID: id, Kind: Started, Detail: "localhost:" + s.LocalPort})
 
 		werr := cmd.Wait()
-		switch {
-		case ctx.Err() != nil:
-			werr = nil
-		case werr != nil:
-			if msg := strings.TrimSpace(errbuf.String()); msg != "" {
-				werr = fmt.Errorf("%s", firstLine(msg))
-			}
+		if ctx.Err() != nil {
+			m.emit(Event{ID: id, Kind: Exited})
+			return
 		}
-		m.emit(exitEvent(id, werr))
+		m.emit(exitEvent(id, endedReason(werr, errs.String(), out.String())))
 	}()
 }
 
@@ -156,9 +150,34 @@ func (m *Manager) emit(e Event) {
 	}
 }
 
+func endedReason(werr error, stderrTail, stdoutTail string) error {
+	if msg := firstLine(strings.TrimSpace(stderrTail)); msg != "" {
+		return errors.New(msg)
+	}
+	last := lastLine(strings.TrimSpace(stdoutTail))
+	switch {
+	case werr != nil && last != "":
+		return fmt.Errorf("%s (%w)", last, werr)
+	case werr != nil:
+		return werr
+	case last != "":
+		return fmt.Errorf(
+			"the session ended on its own; last message from session-manager-plugin: %s", last)
+	default:
+		return errors.New("the session ended on its own, with no message from session-manager-plugin")
+	}
+}
+
 func firstLine(s string) string {
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
 		return s[:i]
+	}
+	return s
+}
+
+func lastLine(s string) string {
+	if i := strings.LastIndexByte(s, '\n'); i >= 0 {
+		return strings.TrimSpace(s[i+1:])
 	}
 	return s
 }

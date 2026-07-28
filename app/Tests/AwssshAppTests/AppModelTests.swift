@@ -759,6 +759,84 @@ final class AppModelTests: XCTestCase {
         XCTAssertNil(m.expandedError, "a panel about an error that is gone")
     }
 
+    @MainActor func testADeathRecordsHowLongItHadBeenUp() {
+        let m = model()
+        m.saveForm(forward(1))
+
+        let start = Date()
+        m.handle(HelperMessage(event: "started", id: 1), now: start)
+        m.handle(
+            HelperMessage(event: "exited", id: 1, error: "the session ended on its own"),
+            now: start.addingTimeInterval(7_500))
+
+        XCTAssertEqual(m.states[1]?.run, .error)
+        XCTAssertEqual(m.states[1]?.detail, "ran for 2h 5m")
+    }
+
+    @MainActor func testAFailureBeforeItEverRanRecordsNoUptime() {
+        let m = model()
+        m.saveForm(forward(1))
+        m.handle(HelperMessage(event: "exited", id: 1, error: "not signed in"))
+
+        XCTAssertEqual(m.states[1]?.detail, "", "it never came up, so there is nothing to report")
+    }
+
+    @MainActor func testImportOpensTheFormPrefilled() {
+        let m = model()
+        m.saveForm(forward(1, name: "mine"))
+
+        m.importShared(
+            #"{"version":1,"forward":{"instance":"theirs","localPort":"6000","#
+                + #""remotePort":"5432","name":"shared db"}}"#)
+
+        XCTAssertTrue(m.showingForm, "the importer reviews it before it is saved")
+        XCTAssertEqual(m.editing?.name, "shared db")
+        XCTAssertEqual(m.editing?.instance, "theirs")
+        XCTAssertNil(m.importError)
+        XCTAssertEqual(m.forwards.count, 1, "nothing is saved until the form is")
+    }
+
+    @MainActor func testAnImportGetsAFreeIDRatherThanTheSendersOwn() {
+        let m = model()
+        m.saveForm(forward(1, name: "mine"))
+
+        m.importShared(#"{"version":1,"forward":{"id":1,"instance":"theirs","localPort":"1","remotePort":"2"}}"#)
+        let imported = try? XCTUnwrap(m.editing)
+        m.saveForm(imported!)
+
+        XCTAssertEqual(m.forwards.count, 2, "an id collision would overwrite the existing row")
+        XCTAssertEqual(m.forwards.map(\.instance).sorted(), ["db", "theirs"])
+    }
+
+    @MainActor func testAFailedImportReportsAndOpensNothing() {
+        let m = model()
+        m.importShared("this is not json")
+
+        XCTAssertFalse(m.showingForm)
+        XCTAssertNotNil(m.importError)
+    }
+
+    @MainActor func testASuccessfulImportClearsAnEarlierComplaint() {
+        let m = model()
+        m.importShared("rubbish")
+        XCTAssertNotNil(m.importError)
+
+        m.importShared(#"{"instance":"theirs","localPort":"1","remotePort":"2"}"#)
+        XCTAssertNil(m.importError)
+    }
+
+    @MainActor func testSharingProducesImportableText() {
+        let m = model()
+        m.saveForm(forward(1, name: "mine"))
+
+        let text = Share.encode(m.forwards[0])
+        let other = model()
+        other.importShared(text)
+
+        XCTAssertEqual(other.editing?.instance, m.forwards[0].instance)
+        XCTAssertEqual(other.editing?.localPort, m.forwards[0].localPort)
+    }
+
     @MainActor func testDeletingAForwardCollapsesItsDetail() {
         let m = model()
         m.saveForm(forward(1))

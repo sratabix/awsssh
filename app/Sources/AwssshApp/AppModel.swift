@@ -16,6 +16,7 @@ final class AppModel: ObservableObject {
     @Published var launchAtLoginError: String?
     @Published var dataNotice: String?
     @Published var expandedError: Int?
+    @Published var importError: String?
 
     let updates = UpdateChecker()
 
@@ -103,9 +104,31 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func copyError(_ message: String) {
+    func copyToClipboard(_ text: String) {
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(message, forType: .string)
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    func share(_ forward: Forward) {
+        importError = nil
+        copyToClipboard(Share.encode(forward))
+    }
+
+    func importFromClipboard() {
+        importShared(NSPasteboard.general.string(forType: .string) ?? "")
+    }
+
+    func importShared(_ text: String) {
+        do {
+            let payload = try Share.decode(text)
+            importError = nil
+            pendingDelete = nil
+            formError = nil
+            editing = Share.forward(from: payload, id: nextID)
+            showingForm = true
+        } catch {
+            importError = error.localizedDescription
+        }
     }
 
     func toggle(_ forward: Forward) {
@@ -289,7 +312,7 @@ final class AppModel: ObservableObject {
         if s.run != .error, expandedError == id { expandedError = nil }
     }
 
-    func handle(_ msg: HelperMessage) {
+    func handle(_ msg: HelperMessage, now: Date = Date()) {
         switch msg.event {
         case "started":
             if let id = msg.id {
@@ -298,7 +321,7 @@ final class AppModel: ObservableObject {
                     $0.run = .running
                     $0.detail = msg.detail ?? ""
                     $0.error = ""
-                    $0.since = Date()
+                    $0.since = now
                 }
             }
         case "exited":
@@ -311,9 +334,13 @@ final class AppModel: ObservableObject {
                 }
                 let requested = states[id]?.run == .stopping
                 if let e = msg.error, !e.isEmpty, !requested {
+                    let ran = states[id]?.since.map {
+                        "ran for \(EntryState.uptimeLabel(now.timeIntervalSince($0)))"
+                    }
                     update(id) {
                         $0.run = .error
                         $0.error = e
+                        $0.detail = ran ?? ""
                         $0.since = nil
                     }
                 } else {

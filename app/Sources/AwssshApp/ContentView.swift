@@ -1,6 +1,9 @@
 import SwiftUI
 
 struct ContentView: View {
+    static let minWidth: CGFloat = 380
+    static let maxWidth: CGFloat = 560
+
     @EnvironmentObject var model: AppModel
 
     var body: some View {
@@ -11,7 +14,7 @@ struct ContentView: View {
                 listView
             }
         }
-        .frame(width: 380)
+        .frame(minWidth: ContentView.minWidth, maxWidth: ContentView.maxWidth)
         .padding(12)
         .onAppear { model.refreshIfChanged() }
     }
@@ -42,7 +45,7 @@ struct ContentView: View {
             }
             Divider()
             Toggle(
-                "Launch at login",
+                "Launch app at login",
                 isOn: Binding(
                     get: { model.launchAtLogin },
                     set: { model.setLaunchAtLogin($0) }
@@ -56,12 +59,19 @@ struct ContentView: View {
             if let notice = model.dataNotice {
                 Text(notice).font(.caption).foregroundStyle(.orange)
             }
+            if let err = model.importError {
+                Text(err).font(.caption).foregroundStyle(.orange)
+            }
             UpdateBadge(updates: model.updates)
             Divider()
             HStack {
                 Button(action: { model.beginAdd() }) {
                     Label("Add forward", systemImage: "plus")
                 }
+                Button(action: { model.importFromClipboard() }) {
+                    Label("Import", systemImage: "square.and.arrow.down")
+                }
+                .help("Add a forward from JSON on the clipboard")
                 Spacer()
                 Button("Quit") { model.quit() }
             }
@@ -119,7 +129,7 @@ struct ForwardRow: View {
         return VStack(alignment: .leading, spacing: 5) {
             header(s)
             if s.run == .error, model.expandedError == forward.id {
-                errorDetail(s.error)
+                errorDetail(s)
             }
         }
         .padding(.vertical, 3)
@@ -129,16 +139,19 @@ struct ForwardRow: View {
         HStack(spacing: 8) {
             Circle().fill(color(for: s.run)).frame(width: 9, height: 9)
             VStack(alignment: .leading, spacing: 1) {
-                HStack(spacing: 6) {
-                    Text(forward.title).fontWeight(.medium)
-                    Text(forward.profileLabel).font(.caption).foregroundStyle(.purple)
-                    if let hotKey = forward.hotKey {
-                        Text(hotKey.displayString)
-                            .font(.caption.monospaced())
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 4)
-                            .background(.quaternary, in: RoundedRectangle(cornerRadius: 3))
+                OverflowScroll {
+                    HStack(spacing: 6) {
+                        Text(forward.title).fontWeight(.medium)
+                        Text(forward.profileLabel).font(.caption).foregroundStyle(.purple)
+                        if let hotKey = forward.hotKey {
+                            Text(hotKey.displayString)
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 4)
+                                .background(.quaternary, in: RoundedRectangle(cornerRadius: 3))
+                        }
                     }
+                    .lineLimit(1)
                 }
                 statusLine(s)
             }
@@ -148,6 +161,10 @@ struct ForwardRow: View {
             }
             .buttonStyle(.borderless)
             .help(buttonIcon(s.run) == "stop.circle" ? "Stop" : "Start")
+            Button(action: { model.share(forward) }) {
+                Image(systemName: "square.and.arrow.up")
+            }
+            .buttonStyle(.borderless).help("Copy as JSON to share")
             Button(action: { model.beginEdit(forward) }) {
                 Image(systemName: "pencil")
             }
@@ -159,17 +176,20 @@ struct ForwardRow: View {
         }
     }
 
-    private func errorDetail(_ message: String) -> some View {
+    private func errorDetail(_ s: EntryState) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(message)
+            if !s.detail.isEmpty {
+                Text(s.detail).font(.caption2).foregroundStyle(.secondary)
+            }
+            Text(s.error)
                 .font(.caption.monospaced())
                 .textSelection(.enabled)
                 .lineLimit(8)
                 .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(idealWidth: 1, maxWidth: .infinity, alignment: .leading)
             HStack(spacing: 6) {
                 Spacer()
-                Button("Copy") { model.copyError(message) }
+                Button("Copy") { model.copyToClipboard(s.error) }
                     .controlSize(.small)
                 Button("Dismiss") { model.dismissError(forward) }
                     .controlSize(.small)
@@ -186,6 +206,7 @@ struct ForwardRow: View {
                 HStack(spacing: 3) {
                     Text(s.error)
                         .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        .frame(idealWidth: 1, maxWidth: .infinity, alignment: .leading)
                     Image(
                         systemName: model.expandedError == forward.id
                             ? "chevron.up" : "chevron.down"
@@ -196,13 +217,16 @@ struct ForwardRow: View {
             .buttonStyle(.plain)
             .help("Show the full message")
         } else if s.run == .running, let since = s.since {
-            TimelineView(.periodic(from: since, by: 1)) { context in
-                Text(status(s, at: context.date))
-                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            OverflowScroll {
+                TimelineView(.periodic(from: since, by: 1)) { context in
+                    Text(status(s, at: context.date))
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
         } else {
-            Text(status(s, at: Date()))
-                .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            OverflowScroll {
+                Text(status(s, at: Date())).font(.caption).foregroundStyle(.secondary)
+            }
         }
     }
 

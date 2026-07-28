@@ -170,6 +170,98 @@ func TestExitEventKeepsARealError(t *testing.T) {
 	}
 }
 
+func TestLastLine(t *testing.T) {
+	cases := map[string]string{
+		"single":              "single",
+		"first\nlast":         "last",
+		"first\nsecond\nlast": "last",
+		"":                    "",
+		"trailing\n":          "",
+		"Port 3308 opened.\nYour session has been terminated.": "Your session has been terminated.",
+	}
+	for in, want := range cases {
+		if got := lastLine(in); got != want {
+			t.Errorf("lastLine(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestEndedReasonAlwaysExplainsItself(t *testing.T) {
+	cases := []struct {
+		name   string
+		werr   error
+		stderr string
+		stdout string
+		want   string
+	}{
+		{
+			name:   "stderr wins",
+			werr:   errors.New("exit status 1"),
+			stderr: "ERROR: cannot perform start session\nusage: ...",
+			stdout: "Starting session",
+			want:   "ERROR: cannot perform start session",
+		},
+		{
+			name:   "a clean exit is still unexplained without output",
+			want:   "the session ended on its own, with no message from session-manager-plugin",
+			stdout: "",
+		},
+		{
+			name:   "a clean exit reports what the plugin last said",
+			stdout: "Port 3308 opened.\nYour session has been terminated.",
+			want: "the session ended on its own; last message from session-manager-plugin: " +
+				"Your session has been terminated.",
+		},
+		{
+			name:   "a dirty exit pairs the last line with the status",
+			werr:   errors.New("exit status 254"),
+			stdout: "Waiting for connections...\nCannot perform start session",
+			want:   "Cannot perform start session (exit status 254)",
+		},
+		{
+			name: "a dirty exit with nothing to say still names the status",
+			werr: errors.New("signal: killed"),
+			want: "signal: killed",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := endedReason(c.werr, c.stderr, c.stdout)
+			if got == nil {
+				t.Fatal("a forward that ends on its own must always carry a reason")
+			}
+			if got.Error() != c.want {
+				t.Errorf("got %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+func TestTailBufferKeepsTheEnd(t *testing.T) {
+	b := newTailBuffer(8)
+	b.Write([]byte("0123456789"))
+	if got := b.String(); got != "23456789" {
+		t.Errorf("got %q, want the last 8 bytes", got)
+	}
+
+	b.Write([]byte("abc"))
+	if got := b.String(); got != "56789abc" {
+		t.Errorf("got %q, want the window to slide", got)
+	}
+}
+
+func TestTailBufferReportsAFullWrite(t *testing.T) {
+	b := newTailBuffer(4)
+	n, err := b.Write([]byte("much longer than four"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != len("much longer than four") {
+		t.Errorf("n = %d; a short write would make exec treat this as an error", n)
+	}
+}
+
 func TestEventKindsAreDistinct(t *testing.T) {
 	if Started == Exited {
 		t.Fatal("Started and Exited must differ")
