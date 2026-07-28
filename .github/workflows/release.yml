@@ -84,23 +84,12 @@ jobs:
           TAG: ${{ steps.ctx.outputs.tag }}
           SHA: ${{ steps.build.outputs.sha }}
         run: |
-          for _ in $(seq 1 15); do
-            VERDICT="$(curl -sS -H "x-apikey: $VT_API_KEY" \
-              "https://www.virustotal.com/api/v3/files/$SHA" \
-              | jq -r '.data.attributes.last_analysis_stats // empty
-                  | "\(.malicious) malicious, \(.suspicious) suspicious, \(.harmless + .undetected) clean"')"
-            [ -n "$VERDICT" ] && break
-            sleep 20
-          done
-
           gh release view "$TAG" --json body -q .body \
             | awk '/^### VirusTotal$/{exit} {print}' \
             | perl -0pe 's/\n+\z/\n/' > body.md
           {
             echo ""
             echo "### VirusTotal"
-            echo ""
-            echo "\`$SHA\` — ${VERDICT:-analysis pending}"
             echo ""
             echo "https://www.virustotal.com/gui/file/$SHA"
           } >> body.md
