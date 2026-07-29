@@ -1,8 +1,9 @@
 import SwiftUI
 
 struct ContentView: View {
-    static let minWidth: CGFloat = 450
+    static let minWidth: CGFloat = 380
     static let maxWidth: CGFloat = 560
+    static let listMaxHeight: CGFloat = 420
 
     @EnvironmentObject var model: AppModel
 
@@ -33,8 +34,18 @@ struct ContentView: View {
                     .font(.callout).foregroundStyle(.secondary)
                     .padding(.vertical, 6)
             } else {
-                ForEach(model.forwards) { forward in
-                    ForwardRow(forward: forward)
+                let groups = model.groups
+                ScrollingList(maxHeight: ContentView.listMaxHeight) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(groups) { group in
+                            GroupHeader(group: group, soleGroup: groups.count == 1)
+                            if !model.isCollapsed(group) {
+                                ForEach(group.forwards) { forward in
+                                    ForwardRow(forward: forward)
+                                }
+                            }
+                        }
+                    }
                 }
             }
             Divider()
@@ -58,17 +69,6 @@ struct ContentView: View {
                     Label("Import", systemImage: "square.and.arrow.down")
                 }
                 .help("Add a forward from JSON on the clipboard")
-                if !model.forwards.isEmpty {
-                    Button(action: { model.toggleAll() }) {
-                        Label(
-                            model.anyLive ? "Stop all" : "Start all",
-                            systemImage: model.anyLive ? "stop.circle" : "play.circle")
-                    }
-                    .help(
-                        model.anyLive
-                            ? "Stop every running forward"
-                            : "Start every forward that is not already running")
-                }
                 Spacer()
                 Button(action: { model.openSettings() }) {
                     Image(systemName: "gearshape")
@@ -94,6 +94,44 @@ struct UpdateBadge: View {
                     .font(.caption2.monospaced()).foregroundStyle(.secondary)
             }
         }
+    }
+}
+
+struct GroupHeader: View {
+    @EnvironmentObject var model: AppModel
+    let group: ForwardGroup
+    let soleGroup: Bool
+
+    var body: some View {
+        let live = model.anyLive(in: group.forwards)
+        let collapsed = model.isCollapsed(group)
+        HStack(spacing: 6) {
+            Button(action: { model.toggleCollapsed(group) }) {
+                HStack(spacing: 4) {
+                    Image(systemName: collapsed ? "chevron.right" : "chevron.down")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 9)
+                    Text(group.title(soleGroup: soleGroup))
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    Text("\(model.runningCount(in: group.forwards))/\(group.forwards.count)")
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.tertiary)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(collapsed ? "Show this group" : "Hide this group")
+            Spacer()
+            Button(action: { model.toggleAll(group.forwards) }) {
+                Image(systemName: live ? "stop.circle" : "play.circle")
+            }
+            .buttonStyle(.borderless)
+            .help(live ? "Stop this group" : "Start this group")
+        }
+        .padding(.top, 2)
     }
 }
 

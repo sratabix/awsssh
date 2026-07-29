@@ -27,6 +27,9 @@ final class AppModel: ObservableObject {
     @Published var showSSO = Preferences.showSSO {
         didSet { Preferences.showSSO = showSSO }
     }
+    @Published var collapsedGroups = Preferences.collapsedGroups {
+        didSet { Preferences.collapsedGroups = collapsedGroups }
+    }
 
     let updates = UpdateChecker()
 
@@ -201,16 +204,36 @@ final class AppModel: ObservableObject {
         helper.send(HelperCommand(cmd: "ssoLogin", login: login.label))
     }
 
-    var anyLive: Bool {
-        forwards.contains { isLive(state(for: $0).run) }
+    var groups: [ForwardGroup] { ForwardGroup.build(from: forwards) }
+
+    var groupNames: [String] { ForwardGroup.names(in: forwards) }
+
+    func isCollapsed(_ group: ForwardGroup) -> Bool {
+        collapsedGroups.contains(group.name)
     }
 
-    func toggleAll() {
-        anyLive ? stopAll() : startAll()
+    func toggleCollapsed(_ group: ForwardGroup) {
+        if collapsedGroups.contains(group.name) {
+            collapsedGroups.remove(group.name)
+        } else {
+            collapsedGroups.insert(group.name)
+        }
     }
 
-    func startAll() {
-        for forward in forwards {
+    func anyLive(in list: [Forward]) -> Bool {
+        list.contains { isLive(state(for: $0).run) }
+    }
+
+    func runningCount(in list: [Forward]) -> Int {
+        list.filter { state(for: $0).run == .running }.count
+    }
+
+    func toggleAll(_ list: [Forward]) {
+        anyLive(in: list) ? stopAll(list) : startAll(list)
+    }
+
+    func startAll(_ list: [Forward]) {
+        for forward in list {
             guard !isLive(state(for: forward).run), forward.validate() == nil else { continue }
             guard liveForward(onLocalPort: forward.localPort, excluding: forward.id) == nil else {
                 continue
@@ -219,8 +242,8 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func stopAll() {
-        for forward in forwards where isLive(state(for: forward).run) {
+    func stopAll(_ list: [Forward]) {
+        for forward in list where isLive(state(for: forward).run) {
             toggle(forward)
         }
     }
@@ -319,6 +342,7 @@ final class AppModel: ObservableObject {
     func saveForm(_ draft: Forward) {
         var forward = draft
         forward.color = ForwardColor.normalise(forward.color)
+        forward.group = forward.group.trimmingCharacters(in: .whitespaces)
 
         if let err = forward.validate() {
             formError = err

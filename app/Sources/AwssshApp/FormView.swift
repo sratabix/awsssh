@@ -9,6 +9,7 @@ struct FormView: View {
         VStack(alignment: .leading, spacing: 8) {
             Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: 6) {
                 field("Name", text: $draft.name, placeholder: "postgres (optional)")
+                groupField
                 profileField
                 field("Region", text: $draft.region, placeholder: "eu-central-1 (optional)")
                 field("Instance", text: $draft.instance, placeholder: "db-prod (Name tag or ID)")
@@ -52,6 +53,31 @@ struct FormView: View {
                     }
                     .buttonStyle(.borderless)
                     .help("Remove shortcut")
+                }
+            }
+        }
+    }
+
+    private var groupField: some View {
+        GridRow {
+            Text("Group").foregroundStyle(.secondary).gridColumnAlignment(.trailing)
+            HStack(spacing: 4) {
+                TextField("databases (optional)", text: $draft.group)
+                    .textFieldStyle(.roundedBorder)
+                if !model.groupNames.isEmpty {
+                    Menu {
+                        ForEach(model.groupNames, id: \.self) { name in
+                            Button(name) { draft.group = name }
+                        }
+                        Divider()
+                        Button("No group") { draft.group = "" }
+                    } label: {
+                        Image(systemName: "chevron.down")
+                    }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .frame(width: 18)
+                    .help("Pick an existing group")
                 }
             }
         }

@@ -10,6 +10,7 @@ struct Forward: Identifiable, Codable, Equatable {
     var host: String = ""
     var remotePort: String = ""
     var color: String = ""
+    var group: String = ""
     var hotKey: HotKey?
 
     init(id: Int) {
@@ -27,6 +28,8 @@ struct Forward: Identifiable, Codable, Equatable {
         host = try c.decodeIfPresent(String.self, forKey: .host) ?? ""
         remotePort = try c.decodeIfPresent(String.self, forKey: .remotePort) ?? ""
         color = ForwardColor.normalise(try c.decodeIfPresent(String.self, forKey: .color) ?? "")
+        group = (try c.decodeIfPresent(String.self, forKey: .group) ?? "")
+            .trimmingCharacters(in: .whitespaces)
         hotKey = (try? c.decodeIfPresent(HotKey.self, forKey: .hotKey)) ?? nil
     }
 

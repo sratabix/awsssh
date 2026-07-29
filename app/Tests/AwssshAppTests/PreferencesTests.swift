@@ -57,6 +57,67 @@ final class PreferencesTests: XCTestCase {
         XCTAssertFalse(AppModel(attached: false).showSSO)
     }
 
+    func testNoGroupIsCollapsedToBeginWith() {
+        XCTAssertTrue(Preferences.collapsedGroups.isEmpty)
+    }
+
+    func testCollapsedGroupsRoundTrip() {
+        Preferences.collapsedGroups = ["databases", ""]
+        XCTAssertEqual(Preferences.collapsedGroups, ["databases", ""])
+
+        Preferences.collapsedGroups = []
+        XCTAssertTrue(Preferences.collapsedGroups.isEmpty)
+    }
+
+    func testTheUngroupedBucketCanBeCollapsedToo() {
+        Preferences.collapsedGroups = [""]
+        XCTAssertTrue(
+            Preferences.collapsedGroups.contains(""),
+            "the empty name is a real key, not a missing value")
+    }
+
+    @MainActor func testCollapsingAGroupPersists() {
+        Store.directoryOverride = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("awsssh-prefs-model-\(UUID().uuidString)")
+        defer { Store.directoryOverride = nil }
+
+        let m = AppModel(attached: false)
+        let group = ForwardGroup(name: "databases", forwards: [])
+
+        XCTAssertFalse(m.isCollapsed(group))
+        m.toggleCollapsed(group)
+        XCTAssertTrue(m.isCollapsed(group))
+        XCTAssertEqual(Preferences.collapsedGroups, ["databases"], "it must survive a relaunch")
+
+        m.toggleCollapsed(group)
+        XCTAssertFalse(m.isCollapsed(group))
+        XCTAssertTrue(Preferences.collapsedGroups.isEmpty)
+    }
+
+    @MainActor func testCollapseStateIsReadAtLaunch() {
+        Preferences.collapsedGroups = ["databases"]
+        Store.directoryOverride = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("awsssh-prefs-model-\(UUID().uuidString)")
+        defer { Store.directoryOverride = nil }
+
+        let m = AppModel(attached: false)
+        XCTAssertTrue(m.isCollapsed(ForwardGroup(name: "databases", forwards: [])))
+        XCTAssertFalse(m.isCollapsed(ForwardGroup(name: "caches", forwards: [])))
+    }
+
+    @MainActor func testCollapsingOneGroupLeavesOthersOpen() {
+        Store.directoryOverride = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("awsssh-prefs-model-\(UUID().uuidString)")
+        defer { Store.directoryOverride = nil }
+
+        let m = AppModel(attached: false)
+        m.toggleCollapsed(ForwardGroup(name: "databases", forwards: []))
+
+        XCTAssertTrue(m.isCollapsed(ForwardGroup(name: "databases", forwards: [])))
+        XCTAssertFalse(m.isCollapsed(ForwardGroup(name: "caches", forwards: [])))
+        XCTAssertFalse(m.isCollapsed(ForwardGroup(name: "", forwards: [])))
+    }
+
     @MainActor func testSettingsOpenAndClose() {
         Store.directoryOverride = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("awsssh-prefs-model-\(UUID().uuidString)")

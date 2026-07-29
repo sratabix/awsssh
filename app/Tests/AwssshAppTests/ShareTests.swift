@@ -14,6 +14,7 @@ final class ShareTests: XCTestCase {
         f.host = "db.internal"
         f.remotePort = "5432"
         f.color = "#FF453A"
+        f.group = "databases"
         f.hotKey = HotKey(keyCode: 1, carbonModifiers: UInt32(cmdKey))
         return f
     }
@@ -30,6 +31,13 @@ final class ShareTests: XCTestCase {
         XCTAssertEqual(back.host, "db.internal")
         XCTAssertEqual(back.remotePort, "5432")
         XCTAssertEqual(back.color, "#FF453A", "the colour is part of the config, not personal")
+        XCTAssertEqual(back.group, "databases")
+    }
+
+    func testASharedGroupIsCleanedLikeEveryOtherField() throws {
+        let payload = try Share.decode(
+            #"{"instance":"bastion","group":"  data\u202Ebases  ","localPort":"1","remotePort":"2"}"#)
+        XCTAssertEqual(payload.group, "databases")
     }
 
     func testASharedColorIsNormalisedOnImport() throws {

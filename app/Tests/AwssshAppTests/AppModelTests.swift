@@ -335,12 +335,12 @@ final class AppModelTests: XCTestCase {
         m.saveForm(forward(1, port: "5432"))
         m.saveForm(forward(2, port: "5433"))
 
-        XCTAssertFalse(m.anyLive)
-        m.toggleAll()
+        XCTAssertFalse(m.anyLive(in: m.forwards))
+        m.toggleAll(m.forwards)
 
         XCTAssertEqual(m.state(for: m.forwards[0]).run, .starting)
         XCTAssertEqual(m.state(for: m.forwards[1]).run, .starting)
-        XCTAssertTrue(m.anyLive, "the button has to flip to Stop all straight away")
+        XCTAssertTrue(m.anyLive(in: m.forwards), "the button has to flip to Stop all straight away")
     }
 
     @MainActor func testStopAllStopsEverythingLive() {
@@ -350,7 +350,7 @@ final class AppModelTests: XCTestCase {
         m.handle(HelperMessage(event: "started", id: 1))
         m.handle(HelperMessage(event: "started", id: 2))
 
-        m.toggleAll()
+        m.toggleAll(m.forwards)
 
         XCTAssertEqual(m.state(for: m.forwards[0]).run, .stopping)
         XCTAssertEqual(m.state(for: m.forwards[1]).run, .stopping)
@@ -361,7 +361,7 @@ final class AppModelTests: XCTestCase {
         m.saveForm(forward(1, port: "5432", name: "first"))
         m.saveForm(forward(2, port: "5432", name: "second"))
 
-        m.startAll()
+        m.startAll(m.forwards)
 
         XCTAssertEqual(m.state(for: m.forwards[0]).run, .starting)
         XCTAssertEqual(
@@ -377,7 +377,7 @@ final class AppModelTests: XCTestCase {
         broken.instance = ""
         m.forwards.append(broken)
 
-        m.startAll()
+        m.startAll(m.forwards)
 
         XCTAssertEqual(m.state(for: m.forwards[0]).run, .starting)
         XCTAssertEqual(m.state(for: broken).run, .stopped)
@@ -389,7 +389,7 @@ final class AppModelTests: XCTestCase {
         m.saveForm(forward(2, port: "5433"))
         m.handle(HelperMessage(event: "started", id: 1, detail: "localhost:5432"))
 
-        m.startAll()
+        m.startAll(m.forwards)
 
         XCTAssertEqual(m.state(for: m.forwards[0]).run, .running, "not toggled off")
         XCTAssertEqual(m.state(for: m.forwards[1]).run, .starting)
@@ -401,26 +401,81 @@ final class AppModelTests: XCTestCase {
         m.handle(HelperMessage(event: "exited", id: 1, error: "boom"))
         XCTAssertEqual(m.state(for: m.forwards[0]).run, .error)
 
-        m.startAll()
+        m.startAll(m.forwards)
         XCTAssertEqual(m.state(for: m.forwards[0]).run, .starting)
     }
 
     @MainActor func testAnyLiveIgnoresStoppedAndErrored() {
         let m = model()
         m.saveForm(forward(1, port: "5432"))
-        XCTAssertFalse(m.anyLive)
+        XCTAssertFalse(m.anyLive(in: m.forwards))
 
         m.handle(HelperMessage(event: "exited", id: 1, error: "boom"))
-        XCTAssertFalse(m.anyLive, "an errored forward is not running")
+        XCTAssertFalse(m.anyLive(in: m.forwards), "an errored forward is not running")
 
         m.handle(HelperMessage(event: "started", id: 1))
-        XCTAssertTrue(m.anyLive)
+        XCTAssertTrue(m.anyLive(in: m.forwards))
     }
 
     @MainActor func testAnyLiveIgnoresAnOrphanedState() {
         let m = model()
         m.states[99] = EntryState(run: .running)
-        XCTAssertFalse(m.anyLive, "a state with no row must not drive the button")
+        XCTAssertFalse(m.anyLive(in: m.forwards), "a state with no row must not drive the button")
+    }
+
+    @MainActor func testAGroupStartsOnlyItsOwnForwards() {
+        let m = model()
+        var db = forward(1, port: "5432", name: "db")
+        db.group = "databases"
+        var cache = forward(2, port: "6379", name: "cache")
+        cache.group = "caches"
+        m.saveForm(db)
+        m.saveForm(cache)
+
+        let databases = m.groups.first { $0.name == "databases" }!
+        m.toggleAll(databases.forwards)
+
+        XCTAssertEqual(m.state(for: m.forwards[0]).run, .starting)
+        XCTAssertEqual(m.state(for: m.forwards[1]).run, .stopped, "the other group is untouched")
+    }
+
+    @MainActor func testAGroupsButtonOnlyReflectsItsOwnForwards() {
+        let m = model()
+        var db = forward(1, port: "5432")
+        db.group = "databases"
+        var cache = forward(2, port: "6379")
+        cache.group = "caches"
+        m.saveForm(db)
+        m.saveForm(cache)
+        m.handle(HelperMessage(event: "started", id: 1))
+
+        let databases = m.groups.first { $0.name == "databases" }!
+        let caches = m.groups.first { $0.name == "caches" }!
+
+        XCTAssertTrue(m.anyLive(in: databases.forwards))
+        XCTAssertFalse(m.anyLive(in: caches.forwards))
+        XCTAssertEqual(m.runningCount(in: databases.forwards), 1)
+        XCTAssertEqual(m.runningCount(in: caches.forwards), 0)
+    }
+
+    @MainActor func testSaveFormTrimsTheGroup() {
+        let m = model()
+        var typed = forward(1)
+        typed.group = "  databases  "
+        m.saveForm(typed)
+
+        XCTAssertEqual(m.forwards[0].group, "databases", "a stray space would make a second group")
+        XCTAssertEqual(m.groupNames, ["databases"])
+    }
+
+    @MainActor func testGroupNamesOffersEachGroupOnce() {
+        let m = model()
+        for (id, group) in [(1, "databases"), (2, "caches"), (3, "databases"), (4, "")] {
+            var f = forward(id, port: "\(6000 + id)")
+            f.group = group
+            m.saveForm(f)
+        }
+        XCTAssertEqual(m.groupNames, ["caches", "databases"])
     }
 
     @MainActor func testLoginsMessageIsStored() {
