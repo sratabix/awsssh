@@ -185,11 +185,51 @@ final class AppModel: ObservableObject {
         showingSettings = false
     }
 
+    func revealStore() {
+        let target = Store.revealTarget()
+        if target.hasDirectoryPath {
+            NSWorkspace.shared.open(target)
+        } else {
+            NSWorkspace.shared.activateFileViewerSelecting([target])
+        }
+    }
+
     func signIn(_ login: SSOLogin) {
         guard signingIn == nil else { return }
         signInError = nil
         signingIn = login.label
         helper.send(HelperCommand(cmd: "ssoLogin", login: login.label))
+    }
+
+    var anyLive: Bool {
+        forwards.contains { isLive(state(for: $0).run) }
+    }
+
+    func toggleAll() {
+        anyLive ? stopAll() : startAll()
+    }
+
+    func startAll() {
+        for forward in forwards {
+            guard !isLive(state(for: forward).run), forward.validate() == nil else { continue }
+            guard liveForward(onLocalPort: forward.localPort, excluding: forward.id) == nil else {
+                continue
+            }
+            toggle(forward)
+        }
+    }
+
+    func stopAll() {
+        for forward in forwards where isLive(state(for: forward).run) {
+            toggle(forward)
+        }
+    }
+
+    private func isLive(_ run: RunState) -> Bool {
+        switch run {
+        case .starting, .running, .reconnecting, .stopping: return true
+        case .stopped, .error: return false
+        }
     }
 
     func toggle(_ forward: Forward) {

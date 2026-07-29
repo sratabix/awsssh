@@ -46,6 +46,10 @@ enum Store {
 
     static var fileURL: URL { directory.appendingPathComponent("forwards.json") }
 
+    static func revealTarget() -> URL {
+        FileManager.default.fileExists(atPath: fileURL.path) ? fileURL : directory
+    }
+
     static func load() -> LoadOutcome {
         guard let data = try? Data(contentsOf: fileURL) else {
             return LoadOutcome(forwards: [], version: currentVersion, stamp: nil)

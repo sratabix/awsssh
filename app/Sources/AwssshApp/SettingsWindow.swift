@@ -26,6 +26,14 @@ struct SettingsView: View {
                 isOn: $model.showSSO
             )
             Divider()
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Saved forwards").font(.callout)
+                Text("forwards.json is the only file Awsssh writes.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button("Show in Finder") { model.revealStore() }
+                    .controlSize(.small)
+            }
+            Divider()
             HStack {
                 Spacer()
                 Button("Done") { model.closeSettings() }

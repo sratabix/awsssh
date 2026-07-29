@@ -229,6 +229,16 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(Store.load().forwards.count, 2)
     }
 
+    func testRevealTargetIsTheDirectoryUntilThereIsAFile() {
+        let before = Store.revealTarget()
+        XCTAssertEqual(
+            before.path, Store.directory.path,
+            "selecting a file that does not exist yet would open nothing")
+
+        _ = Store.save([forward(1)], expecting: nil)
+        XCTAssertEqual(Store.revealTarget().path, Store.fileURL.path)
+    }
+
     func testLegacyFileOnDiskIsBackedUpOnLoad() throws {
         try Data(#"[{"id":1,"instance":"old","localPort":"1","remotePort":"2"}]"#.utf8)
             .write(to: Store.fileURL)

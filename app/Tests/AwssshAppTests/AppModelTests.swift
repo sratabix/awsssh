@@ -330,6 +330,99 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(m.profiles, [], "a nil list clears the menu rather than keeping stale entries")
     }
 
+    @MainActor func testStartAllStartsEverythingStopped() {
+        let m = model()
+        m.saveForm(forward(1, port: "5432"))
+        m.saveForm(forward(2, port: "5433"))
+
+        XCTAssertFalse(m.anyLive)
+        m.toggleAll()
+
+        XCTAssertEqual(m.state(for: m.forwards[0]).run, .starting)
+        XCTAssertEqual(m.state(for: m.forwards[1]).run, .starting)
+        XCTAssertTrue(m.anyLive, "the button has to flip to Stop all straight away")
+    }
+
+    @MainActor func testStopAllStopsEverythingLive() {
+        let m = model()
+        m.saveForm(forward(1, port: "5432"))
+        m.saveForm(forward(2, port: "5433"))
+        m.handle(HelperMessage(event: "started", id: 1))
+        m.handle(HelperMessage(event: "started", id: 2))
+
+        m.toggleAll()
+
+        XCTAssertEqual(m.state(for: m.forwards[0]).run, .stopping)
+        XCTAssertEqual(m.state(for: m.forwards[1]).run, .stopping)
+    }
+
+    @MainActor func testStartAllSkipsASharedLocalPortRatherThanErroring() {
+        let m = model()
+        m.saveForm(forward(1, port: "5432", name: "first"))
+        m.saveForm(forward(2, port: "5432", name: "second"))
+
+        m.startAll()
+
+        XCTAssertEqual(m.state(for: m.forwards[0]).run, .starting)
+        XCTAssertEqual(
+            m.state(for: m.forwards[1]).run, .stopped,
+            "two forwards on one port is a supported setup, not an error to shout about")
+        XCTAssertTrue(m.state(for: m.forwards[1]).error.isEmpty)
+    }
+
+    @MainActor func testStartAllSkipsAnInvalidForward() {
+        let m = model()
+        m.saveForm(forward(1, port: "5432"))
+        var broken = forward(2, port: "5433")
+        broken.instance = ""
+        m.forwards.append(broken)
+
+        m.startAll()
+
+        XCTAssertEqual(m.state(for: m.forwards[0]).run, .starting)
+        XCTAssertEqual(m.state(for: broken).run, .stopped)
+    }
+
+    @MainActor func testStartAllLeavesAlreadyRunningOnesAlone() {
+        let m = model()
+        m.saveForm(forward(1, port: "5432"))
+        m.saveForm(forward(2, port: "5433"))
+        m.handle(HelperMessage(event: "started", id: 1, detail: "localhost:5432"))
+
+        m.startAll()
+
+        XCTAssertEqual(m.state(for: m.forwards[0]).run, .running, "not toggled off")
+        XCTAssertEqual(m.state(for: m.forwards[1]).run, .starting)
+    }
+
+    @MainActor func testStartAllRetriesAnErroredForward() {
+        let m = model()
+        m.saveForm(forward(1, port: "5432"))
+        m.handle(HelperMessage(event: "exited", id: 1, error: "boom"))
+        XCTAssertEqual(m.state(for: m.forwards[0]).run, .error)
+
+        m.startAll()
+        XCTAssertEqual(m.state(for: m.forwards[0]).run, .starting)
+    }
+
+    @MainActor func testAnyLiveIgnoresStoppedAndErrored() {
+        let m = model()
+        m.saveForm(forward(1, port: "5432"))
+        XCTAssertFalse(m.anyLive)
+
+        m.handle(HelperMessage(event: "exited", id: 1, error: "boom"))
+        XCTAssertFalse(m.anyLive, "an errored forward is not running")
+
+        m.handle(HelperMessage(event: "started", id: 1))
+        XCTAssertTrue(m.anyLive)
+    }
+
+    @MainActor func testAnyLiveIgnoresAnOrphanedState() {
+        let m = model()
+        m.states[99] = EntryState(run: .running)
+        XCTAssertFalse(m.anyLive, "a state with no row must not drive the button")
+    }
+
     @MainActor func testLoginsMessageIsStored() {
         let m = model()
         m.handle(

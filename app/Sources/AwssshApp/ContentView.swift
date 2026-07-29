@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct ContentView: View {
-    static let minWidth: CGFloat = 380
+    static let minWidth: CGFloat = 450
     static let maxWidth: CGFloat = 560
 
     @EnvironmentObject var model: AppModel
@@ -58,6 +58,17 @@ struct ContentView: View {
                     Label("Import", systemImage: "square.and.arrow.down")
                 }
                 .help("Add a forward from JSON on the clipboard")
+                if !model.forwards.isEmpty {
+                    Button(action: { model.toggleAll() }) {
+                        Label(
+                            model.anyLive ? "Stop all" : "Start all",
+                            systemImage: model.anyLive ? "stop.circle" : "play.circle")
+                    }
+                    .help(
+                        model.anyLive
+                            ? "Stop every running forward"
+                            : "Start every forward that is not already running")
+                }
                 Spacer()
                 Button(action: { model.openSettings() }) {
                     Image(systemName: "gearshape")
