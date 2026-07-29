@@ -13,6 +13,7 @@ final class ShareTests: XCTestCase {
         f.localPort = "5432"
         f.host = "db.internal"
         f.remotePort = "5432"
+        f.color = "#FF453A"
         f.hotKey = HotKey(keyCode: 1, carbonModifiers: UInt32(cmdKey))
         return f
     }
@@ -28,6 +29,19 @@ final class ShareTests: XCTestCase {
         XCTAssertEqual(back.localPort, "5432")
         XCTAssertEqual(back.host, "db.internal")
         XCTAssertEqual(back.remotePort, "5432")
+        XCTAssertEqual(back.color, "#FF453A", "the colour is part of the config, not personal")
+    }
+
+    func testASharedColorIsNormalisedOnImport() throws {
+        let payload = try Share.decode(
+            #"{"instance":"bastion","color":"f00","localPort":"1","remotePort":"2"}"#)
+        XCTAssertEqual(payload.color, "#FF0000")
+    }
+
+    func testASharedColorThatIsNotAColorIsDropped() throws {
+        let payload = try Share.decode(
+            #"{"instance":"bastion","color":"javascript:alert(1)","localPort":"1","remotePort":"2"}"#)
+        XCTAssertEqual(payload.color, "", "only a hex value ever reaches forwards.json")
     }
 
     func testTheHotKeyIsNeverShared() throws {

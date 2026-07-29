@@ -2,12 +2,16 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/sratabix/awsssh/internal/awsx"
 	"github.com/sratabix/awsssh/internal/forward"
 )
 
@@ -29,7 +33,7 @@ func runServe(t *testing.T, stdin string) []message {
 
 	mgr := forward.NewManager(t.Context(), forward.NewProvider(t.Context()))
 	var out bytes.Buffer
-	serve(strings.NewReader(stdin), &out, mgr)
+	serve(t.Context(), strings.NewReader(stdin), &out, mgr)
 
 	var messages []message
 	decoder := json.NewDecoder(bytes.NewReader(out.Bytes()))
@@ -73,7 +77,7 @@ func TestServeAnswersProfiles(t *testing.T) {
 
 	mgr := forward.NewManager(t.Context(), forward.NewProvider(t.Context()))
 	var out bytes.Buffer
-	serve(strings.NewReader(`{"cmd":"profiles"}`+"\n"), &out, mgr)
+	serve(t.Context(), strings.NewReader(`{"cmd":"profiles"}`+"\n"), &out, mgr)
 
 	var messages []message
 	decoder := json.NewDecoder(bytes.NewReader(out.Bytes()))
@@ -182,7 +186,7 @@ func TestServeOutputIsOneJSONObjectPerLine(t *testing.T) {
 	isolateAWS(t)
 	mgr := forward.NewManager(t.Context(), forward.NewProvider(t.Context()))
 	var out bytes.Buffer
-	serve(strings.NewReader(`{"cmd":"profiles"}`+"\n"), &out, mgr)
+	serve(t.Context(), strings.NewReader(`{"cmd":"profiles"}`+"\n"), &out, mgr)
 
 	for _, line := range strings.Split(strings.TrimRight(out.String(), "\n"), "\n") {
 		if line == "" {
@@ -268,4 +272,119 @@ func TestOutputIsSafeForConcurrentSenders(t *testing.T) {
 
 func writeFile(path, contents string) error {
 	return os.WriteFile(path, []byte(contents), 0o600)
+}
+
+func stubLogins(t *testing.T, found []awsx.Login, run func(context.Context, awsx.Login) error) {
+	t.Helper()
+	previousList, previousRun := listLogins, ssoLogin
+	listLogins = func() []awsx.Login { return found }
+	ssoLogin = run
+	t.Cleanup(func() { listLogins, ssoLogin = previousList, previousRun })
+}
+
+func sharedSession() []awsx.Login {
+	return []awsx.Login{{
+		Session:  "sacha",
+		StartURL: "https://example.awsapps.com/start",
+		Profiles: []string{"Atabase", "Atabix"},
+		Expires:  time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC),
+	}}
+}
+
+func TestServeListsSSOLogins(t *testing.T) {
+	stubLogins(t, sharedSession(), nil)
+
+	m, ok := firstWithEvent(runServe(t, `{"cmd":"logins"}`+"\n"), "logins")
+	if !ok {
+		t.Fatal("no logins message")
+	}
+	if len(m.Logins) != 1 {
+		t.Fatalf("Logins = %+v, want one", m.Logins)
+	}
+	if m.Logins[0].Label != "sacha" {
+		t.Errorf("Label = %q, want the session name", m.Logins[0].Label)
+	}
+	if m.Logins[0].Expires != "2030-01-02T03:04:05Z" {
+		t.Errorf("Expires = %q, want RFC3339", m.Logins[0].Expires)
+	}
+	if len(m.Logins[0].Profiles) != 2 {
+		t.Errorf("Profiles = %v, want every profile the one login covers", m.Logins[0].Profiles)
+	}
+}
+
+func TestALoginWithNoCachedTokenReportsNoExpiry(t *testing.T) {
+	stubLogins(t, []awsx.Login{{Session: "sacha", Profiles: []string{"a"}}}, nil)
+
+	m, _ := firstWithEvent(runServe(t, `{"cmd":"logins"}`+"\n"), "logins")
+	if m.Logins[0].Expires != "" {
+		t.Errorf("Expires = %q, want empty for a signed-out session", m.Logins[0].Expires)
+	}
+}
+
+func TestSSOLoginRunsTheMatchingLoginAndRefreshes(t *testing.T) {
+	var ran []string
+	stubLogins(t, sharedSession(), func(_ context.Context, login awsx.Login) error {
+		ran = append(ran, strings.Join(login.Args(), " "))
+		return nil
+	})
+
+	messages := runServe(t, `{"cmd":"ssoLogin","login":"sacha"}`+"\n")
+
+	if len(ran) != 1 || ran[0] != "sso login --profile Atabase" {
+		t.Fatalf("ran = %v, want one aws sso login for a profile of that session", ran)
+	}
+	m, ok := firstWithEvent(messages, "ssoLogin")
+	if !ok {
+		t.Fatal("no ssoLogin message")
+	}
+	if m.Error != "" {
+		t.Errorf("Error = %q, want none", m.Error)
+	}
+	if _, ok := firstWithEvent(messages, "logins"); !ok {
+		t.Error("a completed sign-in should push the refreshed expiry without being asked")
+	}
+}
+
+func TestSSOLoginReportsAFailure(t *testing.T) {
+	stubLogins(t, sharedSession(), func(context.Context, awsx.Login) error {
+		return errors.New("the AWS CLI is not installed")
+	})
+
+	m, ok := firstWithEvent(runServe(t, `{"cmd":"ssoLogin","login":"sacha"}`+"\n"), "ssoLogin")
+	if !ok {
+		t.Fatal("no ssoLogin message")
+	}
+	if m.Error != "the AWS CLI is not installed" {
+		t.Errorf("Error = %q, want the runner's message", m.Error)
+	}
+	if m.Detail != "sacha" {
+		t.Errorf("Detail = %q, want the login it was about", m.Detail)
+	}
+}
+
+func TestSSOLoginRejectsAnUnknownLabel(t *testing.T) {
+	called := false
+	stubLogins(t, sharedSession(), func(context.Context, awsx.Login) error {
+		called = true
+		return nil
+	})
+
+	m, _ := firstWithEvent(runServe(t, `{"cmd":"ssoLogin","login":"nope"}`+"\n"), "ssoLogin")
+	if called {
+		t.Error("an unknown label must not run the AWS CLI")
+	}
+	if !strings.Contains(m.Error, "nope") {
+		t.Errorf("Error = %q, should name what was asked for", m.Error)
+	}
+}
+
+func TestServeWaitsForASignInBeforeShuttingDown(t *testing.T) {
+	stubLogins(t, sharedSession(), func(context.Context, awsx.Login) error {
+		time.Sleep(20 * time.Millisecond)
+		return nil
+	})
+
+	if _, ok := firstWithEvent(runServe(t, `{"cmd":"ssoLogin","login":"sacha"}`+"\n"), "ssoLogin"); !ok {
+		t.Error("stdin EOF must not drop a sign-in that is still running")
+	}
 }

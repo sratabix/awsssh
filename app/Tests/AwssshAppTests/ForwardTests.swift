@@ -113,6 +113,7 @@ final class ForwardTests: XCTestCase {
         XCTAssertEqual(f.localPort, "")
         XCTAssertEqual(f.host, "")
         XCTAssertEqual(f.remotePort, "")
+        XCTAssertEqual(f.color, "")
         XCTAssertNil(f.hotKey)
     }
 

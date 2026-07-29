@@ -7,16 +7,10 @@ struct ContentView: View {
     @EnvironmentObject var model: AppModel
 
     var body: some View {
-        Group {
-            if model.showingForm, let editing = model.editing {
-                FormView(draft: editing)
-            } else {
-                listView
-            }
-        }
-        .frame(minWidth: ContentView.minWidth, maxWidth: ContentView.maxWidth)
-        .padding(12)
-        .onAppear { model.refreshIfChanged() }
+        listView
+            .frame(minWidth: ContentView.minWidth, maxWidth: ContentView.maxWidth)
+            .padding(12)
+            .onAppear { model.refreshIfChanged() }
     }
 
     private var listView: some View {
@@ -44,15 +38,7 @@ struct ContentView: View {
                 }
             }
             Divider()
-            Toggle(
-                "Launch app at login",
-                isOn: Binding(
-                    get: { model.launchAtLogin },
-                    set: { model.setLaunchAtLogin($0) }
-                )
-            )
-            .toggleStyle(.checkbox)
-            .font(.callout)
+            SignInRow()
             if let err = model.launchAtLoginError {
                 Text(err).font(.caption).foregroundStyle(.orange)
             }
@@ -73,6 +59,11 @@ struct ContentView: View {
                 }
                 .help("Add a forward from JSON on the clipboard")
                 Spacer()
+                Button(action: { model.openSettings() }) {
+                    Image(systemName: "gearshape")
+                }
+                .buttonStyle(.borderless)
+                .help("Settings")
                 Button("Quit") { model.quit() }
             }
         }
@@ -92,6 +83,28 @@ struct UpdateBadge: View {
                     .font(.caption2.monospaced()).foregroundStyle(.secondary)
             }
         }
+    }
+}
+
+struct RowTint: ViewModifier {
+    let color: Color?
+
+    private static let cornerRadius: CGFloat = 6
+    private static let fillOpacity: Double = 0.18
+    private static let borderOpacity: Double = 0.4
+
+    func body(content: Content) -> some View {
+        content
+            .padding(.horizontal, 7)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: RowTint.cornerRadius)
+                    .fill((color ?? .clear).opacity(RowTint.fillOpacity))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: RowTint.cornerRadius)
+                    .strokeBorder((color ?? .clear).opacity(RowTint.borderOpacity), lineWidth: 1)
+            )
     }
 }
 
@@ -121,7 +134,7 @@ struct ForwardRow: View {
                 .controlSize(.small)
                 .tint(.red)
         }
-        .padding(.vertical, 3)
+        .modifier(RowTint(color: forward.tint))
     }
 
     private var row: some View {
@@ -132,7 +145,7 @@ struct ForwardRow: View {
                 errorDetail(s)
             }
         }
-        .padding(.vertical, 3)
+        .modifier(RowTint(color: forward.tint))
     }
 
     private func header(_ s: EntryState) -> some View {

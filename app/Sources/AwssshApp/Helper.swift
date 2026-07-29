@@ -13,6 +13,13 @@ struct HelperCommand: Codable {
     var cmd: String
     var id: Int?
     var forward: HelperForward?
+    var login: String?
+}
+
+struct HelperLogin: Codable {
+    var label: String
+    var profiles: [String]?
+    var expires: String?
 }
 
 struct HelperMessage: Codable {
@@ -21,6 +28,7 @@ struct HelperMessage: Codable {
     var detail: String?
     var error: String?
     var profiles: [String]?
+    var logins: [HelperLogin]?
 }
 
 final class Helper {

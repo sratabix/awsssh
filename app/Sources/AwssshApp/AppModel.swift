@@ -17,10 +17,19 @@ final class AppModel: ObservableObject {
     @Published var dataNotice: String?
     @Published var expandedError: Int?
     @Published var importError: String?
+    @Published var logins: [SSOLogin] = []
+    @Published var signingIn: String?
+    @Published var signInError: String?
+    @Published var showingSettings = false
+    @Published var showSSO = Preferences.showSSO {
+        didSet { Preferences.showSSO = showSSO }
+    }
 
     let updates = UpdateChecker()
 
     private let helper = Helper()
+    private let forms = FormWindowPresenter()
+    private let settings = SettingsWindowPresenter()
     private let attached: Bool
     private var nextID = 1
     private var stamp: Date?
@@ -40,9 +49,12 @@ final class AppModel: ObservableObject {
 
         guard attached else { return }
 
+        forms.attach(to: self)
+        settings.attach(to: self)
         helper.onMessage = { [weak self] msg in self?.handle(msg) }
         helper.start()
         helper.send(HelperCommand(cmd: "profiles"))
+        helper.send(HelperCommand(cmd: "logins"))
 
         HotKeyCenter.shared.onFire = { [weak self] id in
             guard let self, let forward = self.forwards.first(where: { $0.id == id }) else { return }
@@ -131,6 +143,21 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func openSettings() {
+        showingSettings = true
+    }
+
+    func closeSettings() {
+        showingSettings = false
+    }
+
+    func signIn(_ login: SSOLogin) {
+        guard signingIn == nil else { return }
+        signInError = nil
+        signingIn = login.label
+        helper.send(HelperCommand(cmd: "ssoLogin", login: login.label))
+    }
+
     func toggle(_ forward: Forward) {
         switch state(for: forward).run {
         case .running, .starting, .reconnecting:
@@ -215,7 +242,10 @@ final class AppModel: ObservableObject {
         showingForm = true
     }
 
-    func saveForm(_ forward: Forward) {
+    func saveForm(_ draft: Forward) {
+        var forward = draft
+        forward.color = ForwardColor.normalise(forward.color)
+
         if let err = forward.validate() {
             formError = err
             return
@@ -273,6 +303,7 @@ final class AppModel: ObservableObject {
 
     func refreshIfChanged() {
         helper.send(HelperCommand(cmd: "profiles"))
+        helper.send(HelperCommand(cmd: "logins"))
 
         guard !showingForm, pendingDelete == nil else { return }
         guard let onDisk = Store.stamp(), onDisk != stamp else { return }
@@ -354,6 +385,13 @@ final class AppModel: ObservableObject {
             }
         case "profiles":
             profiles = msg.profiles ?? []
+        case "logins":
+            logins = (msg.logins ?? []).map(SSOLogin.init)
+        case "ssoLogin":
+            if signingIn == nil || signingIn == msg.detail {
+                signingIn = nil
+                signInError = msg.error
+            }
         default:
             break
         }

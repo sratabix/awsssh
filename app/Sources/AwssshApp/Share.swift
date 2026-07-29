@@ -40,6 +40,7 @@ enum Share {
         var localPort: String = ""
         var host: String = ""
         var remotePort: String = ""
+        var color: String = ""
 
         init(_ forward: Forward) {
             name = forward.name
@@ -49,6 +50,7 @@ enum Share {
             localPort = forward.localPort
             host = forward.host
             remotePort = forward.remotePort
+            color = forward.color
         }
 
         init(from decoder: Decoder) throws {
@@ -63,6 +65,7 @@ enum Share {
             localPort = try field(.localPort)
             host = try field(.host)
             remotePort = try field(.remotePort)
+            color = ForwardColor.normalise(try field(.color))
         }
     }
 
@@ -114,6 +117,7 @@ enum Share {
         forward.localPort = payload.localPort
         forward.host = payload.host
         forward.remotePort = payload.remotePort
+        forward.color = payload.color
         return forward
     }
 }

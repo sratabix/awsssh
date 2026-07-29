@@ -32,6 +32,7 @@ func awsFiles(t *testing.T, config, credentials string) {
 	t.Setenv("AWS_REGION", "")
 	t.Setenv("AWS_DEFAULT_REGION", "")
 	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+	t.Setenv("HOME", dir)
 }
 
 func TestProfilesSkipsNonProfileSections(t *testing.T) {

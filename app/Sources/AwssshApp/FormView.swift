@@ -3,13 +3,10 @@ import SwiftUI
 struct FormView: View {
     @EnvironmentObject var model: AppModel
     @State var draft: Forward
-
-    private var isEdit: Bool { model.forwards.contains { $0.id == draft.id } }
+    @State private var hexText = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(isEdit ? "Edit forward" : "Add forward").font(.headline)
-            Divider()
             Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: 6) {
                 field("Name", text: $draft.name, placeholder: "postgres (optional)")
                 profileField
@@ -18,6 +15,7 @@ struct FormView: View {
                 field("Local port", text: $draft.localPort, placeholder: "5432")
                 field("Remote host", text: $draft.host, placeholder: "db.internal (optional)")
                 field("Remote port", text: $draft.remotePort, placeholder: "5432")
+                colorField
                 hotKeyField
             }
             if let err = model.formError {
@@ -26,10 +24,12 @@ struct FormView: View {
             Divider()
             HStack {
                 Button("Cancel") { model.cancelForm() }
+                    .keyboardShortcut(.cancelAction)
                 Spacer()
                 Button("Save") { model.saveForm(draft) }.keyboardShortcut(.defaultAction)
             }
         }
+        .onAppear { hexText = draft.color }
     }
 
     private func field(_ label: String, text: Binding<String>, placeholder: String) -> some View {
@@ -55,6 +55,50 @@ struct FormView: View {
                 }
             }
         }
+    }
+
+    private var colorField: some View {
+        GridRow {
+            Text("Color").foregroundStyle(.secondary).gridColumnAlignment(.trailing)
+            HStack(spacing: 5) {
+                swatch(hex: "", label: "No color")
+                ForEach(ForwardColor.presets, id: \.hex) { preset in
+                    swatch(hex: preset.hex, label: preset.name)
+                }
+                TextField("#RRGGBB", text: $hexText)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.caption.monospaced())
+                    .frame(width: 82)
+                    .onChange(of: hexText) { draft.color = $0 }
+            }
+        }
+    }
+
+    private func swatch(hex: String, label: String) -> some View {
+        let selected = ForwardColor.normalise(draft.color) == hex
+        return Button {
+            draft.color = hex
+            hexText = hex
+        } label: {
+            Circle()
+                .fill(ForwardColor.color(hex) ?? Color.secondary.opacity(0.12))
+                .frame(width: 15, height: 15)
+                .overlay {
+                    if hex.isEmpty {
+                        Image(systemName: "slash.circle")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .overlay(
+                    Circle().strokeBorder(
+                        selected ? Color.primary : Color.secondary.opacity(0.45),
+                        lineWidth: selected ? 2 : 1)
+                )
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .help(label)
     }
 
     private var profileField: some View {

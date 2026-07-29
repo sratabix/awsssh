@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/sratabix/awsssh/internal/awsx"
 	"github.com/sratabix/awsssh/internal/forward"
@@ -18,6 +19,7 @@ type command struct {
 	Cmd     string       `json:"cmd"`
 	ID      int          `json:"id,omitempty"`
 	Forward *forwardSpec `json:"forward,omitempty"`
+	Login   string       `json:"login,omitempty"`
 }
 
 type forwardSpec struct {
@@ -29,12 +31,19 @@ type forwardSpec struct {
 	RemotePort string `json:"remote"`
 }
 
+type loginInfo struct {
+	Label    string   `json:"label"`
+	Profiles []string `json:"profiles"`
+	Expires  string   `json:"expires,omitempty"`
+}
+
 type message struct {
-	Event    string   `json:"event"`
-	ID       int      `json:"id,omitempty"`
-	Detail   string   `json:"detail,omitempty"`
-	Error    string   `json:"error,omitempty"`
-	Profiles []string `json:"profiles,omitempty"`
+	Event    string      `json:"event"`
+	ID       int         `json:"id,omitempty"`
+	Detail   string      `json:"detail,omitempty"`
+	Error    string      `json:"error,omitempty"`
+	Profiles []string    `json:"profiles,omitempty"`
+	Logins   []loginInfo `json:"logins,omitempty"`
 }
 
 type output struct {
@@ -54,11 +63,12 @@ func main() {
 
 	provider := forward.NewProvider(ctx)
 	mgr := forward.NewManager(ctx, provider)
-	serve(os.Stdin, os.Stdout, mgr)
+	serve(ctx, os.Stdin, os.Stdout, mgr)
 }
 
-func serve(in io.Reader, w io.Writer, mgr *forward.Manager) {
+func serve(ctx context.Context, in io.Reader, w io.Writer, mgr *forward.Manager) {
 	out := &output{enc: json.NewEncoder(w)}
+	var background sync.WaitGroup
 
 	done := make(chan struct{})
 	go func() {
@@ -87,14 +97,21 @@ func serve(in io.Reader, w io.Writer, mgr *forward.Manager) {
 			out.send(message{Event: "error", Error: "bad command: " + err.Error()})
 			continue
 		}
-		handle(c, mgr, out)
+		handle(ctx, c, mgr, out, &background)
 	}
 
+	background.Wait()
 	mgr.Close()
 	<-done
 }
 
-func handle(c command, mgr *forward.Manager, out *output) {
+func handle(
+	ctx context.Context,
+	c command,
+	mgr *forward.Manager,
+	out *output,
+	background *sync.WaitGroup,
+) {
 	switch c.Cmd {
 	case "start":
 		if c.Forward == nil {
@@ -115,7 +132,49 @@ func handle(c command, mgr *forward.Manager, out *output) {
 		mgr.StopAll()
 	case "profiles":
 		out.send(message{Event: "profiles", Profiles: awsx.Profiles()})
+	case "logins":
+		out.send(loginList())
+	case "ssoLogin":
+		background.Add(1)
+		go func() {
+			defer background.Done()
+			signIn(ctx, c.Login, out)
+		}()
 	default:
 		out.send(message{Event: "error", Error: "unknown cmd: " + c.Cmd})
 	}
+}
+
+var (
+	listLogins = awsx.Logins
+	ssoLogin   = awsx.RunSSOLogin
+)
+
+func loginList() message {
+	found := listLogins()
+	infos := make([]loginInfo, 0, len(found))
+	for _, login := range found {
+		info := loginInfo{Label: login.Label(), Profiles: login.Profiles}
+		if !login.Expires.IsZero() {
+			info.Expires = login.Expires.Format(time.RFC3339)
+		}
+		infos = append(infos, info)
+	}
+	return message{Event: "logins", Logins: infos}
+}
+
+func signIn(ctx context.Context, label string, out *output) {
+	for _, login := range listLogins() {
+		if login.Label() != label {
+			continue
+		}
+		if err := ssoLogin(ctx, login); err != nil {
+			out.send(message{Event: "ssoLogin", Detail: label, Error: err.Error()})
+			return
+		}
+		out.send(message{Event: "ssoLogin", Detail: label})
+		out.send(loginList())
+		return
+	}
+	out.send(message{Event: "ssoLogin", Detail: label, Error: "no SSO sign-in named " + label})
 }

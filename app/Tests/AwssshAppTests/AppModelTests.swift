@@ -115,6 +115,26 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(m.forwards[0].name, "renamed")
     }
 
+    @MainActor func testSaveFormNormalisesTheColor() {
+        let m = model()
+        var typed = forward(1)
+        typed.color = " f00 "
+        m.saveForm(typed)
+
+        XCTAssertEqual(m.forwards[0].color, "#FF0000", "what the user typed is not what is stored")
+        XCTAssertEqual(Store.load().forwards[0].color, "#FF0000")
+    }
+
+    @MainActor func testSaveFormDropsAColorItCannotRead() {
+        let m = model()
+        var typed = forward(1)
+        typed.color = "#zz"
+        m.saveForm(typed)
+
+        XCTAssertEqual(m.forwards.count, 1, "a bad color must not block the save")
+        XCTAssertEqual(m.forwards[0].color, "")
+    }
+
     @MainActor func testSaveFormRejectsAnInvalidForward() {
         let m = model()
         var broken = forward(1)
@@ -308,6 +328,69 @@ final class AppModelTests: XCTestCase {
 
         m.handle(HelperMessage(event: "profiles"))
         XCTAssertEqual(m.profiles, [], "a nil list clears the menu rather than keeping stale entries")
+    }
+
+    @MainActor func testLoginsMessageIsStored() {
+        let m = model()
+        m.handle(
+            HelperMessage(
+                event: "logins",
+                logins: [HelperLogin(label: "sacha", profiles: ["a", "b"], expires: nil)]))
+
+        XCTAssertEqual(m.logins.map(\.label), ["sacha"])
+        XCTAssertEqual(m.logins[0].profiles, ["a", "b"])
+    }
+
+    @MainActor func testSignInMarksTheLoginBusyUntilTheHelperAnswers() {
+        let m = model()
+        m.logins = [SSOLogin(label: "sacha")]
+        m.signIn(m.logins[0])
+
+        XCTAssertEqual(m.signingIn, "sacha")
+        XCTAssertNil(m.signInError)
+
+        m.handle(HelperMessage(event: "ssoLogin", detail: "sacha"))
+        XCTAssertNil(m.signingIn)
+        XCTAssertNil(m.signInError)
+    }
+
+    @MainActor func testAFailedSignInReportsAndClearsBusy() {
+        let m = model()
+        m.logins = [SSOLogin(label: "sacha")]
+        m.signIn(m.logins[0])
+        m.handle(HelperMessage(event: "ssoLogin", detail: "sacha", error: "the AWS CLI is not installed"))
+
+        XCTAssertNil(m.signingIn)
+        XCTAssertEqual(m.signInError, "the AWS CLI is not installed")
+    }
+
+    @MainActor func testASecondSignInIsIgnoredWhileOneIsRunning() {
+        let m = model()
+        m.logins = [SSOLogin(label: "sacha"), SSOLogin(label: "other")]
+        m.signIn(m.logins[0])
+        m.signIn(m.logins[1])
+
+        XCTAssertEqual(m.signingIn, "sacha", "double-clicking must not open two browser flows")
+    }
+
+    @MainActor func testAnotherLoginsResultDoesNotClearTheRunningOne() {
+        let m = model()
+        m.logins = [SSOLogin(label: "sacha"), SSOLogin(label: "other")]
+        m.signIn(m.logins[0])
+        m.handle(HelperMessage(event: "ssoLogin", detail: "other", error: "stale"))
+
+        XCTAssertEqual(m.signingIn, "sacha")
+        XCTAssertNil(m.signInError, "a result for a different login is not this one's failure")
+    }
+
+    @MainActor func testStartingASignInClearsTheLastComplaint() {
+        let m = model()
+        m.logins = [SSOLogin(label: "sacha")]
+        m.signIn(m.logins[0])
+        m.handle(HelperMessage(event: "ssoLogin", detail: "sacha", error: "boom"))
+        m.signIn(m.logins[0])
+
+        XCTAssertNil(m.signInError)
     }
 
     @MainActor func testUnknownEventsAreIgnored() {
