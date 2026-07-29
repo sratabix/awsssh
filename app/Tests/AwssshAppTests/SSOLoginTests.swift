@@ -7,7 +7,7 @@ final class SSOLoginTests: XCTestCase {
 
     private func login(in seconds: TimeInterval?, profiles: [String] = ["a", "b"]) -> SSOLogin {
         SSOLogin(
-            label: "sacha",
+            label: "company",
             profiles: profiles,
             expires: seconds.map { now.addingTimeInterval($0) })
     }
@@ -37,21 +37,21 @@ final class SSOLoginTests: XCTestCase {
 
     func testTheWireFormatDecodes() {
         let decoded = SSOLogin(
-            HelperLogin(label: "sacha", profiles: ["a"], expires: "2030-01-02T03:04:05Z"))
+            HelperLogin(label: "company", profiles: ["a"], expires: "2030-01-02T03:04:05Z"))
 
-        XCTAssertEqual(decoded.label, "sacha")
+        XCTAssertEqual(decoded.label, "company")
         XCTAssertEqual(decoded.profiles, ["a"])
         XCTAssertEqual(decoded.expires?.timeIntervalSince1970, 1_893_553_445)
     }
 
     func testAMissingExpiryDecodesToNil() {
-        let decoded = SSOLogin(HelperLogin(label: "sacha", profiles: nil, expires: nil))
+        let decoded = SSOLogin(HelperLogin(label: "company", profiles: nil, expires: nil))
         XCTAssertNil(decoded.expires)
         XCTAssertEqual(decoded.profiles, [])
     }
 
     func testAnUnparseableExpiryIsTreatedAsSignedOut() {
-        let decoded = SSOLogin(HelperLogin(label: "sacha", profiles: [], expires: "whenever"))
+        let decoded = SSOLogin(HelperLogin(label: "company", profiles: [], expires: "whenever"))
         XCTAssertNil(decoded.expires)
         XCTAssertFalse(decoded.signedIn(at: now))
     }
@@ -61,6 +61,85 @@ final class SSOLoginTests: XCTestCase {
     }
 
     func testTheLabelIsTheIdentity() {
-        XCTAssertEqual(login(in: 60).id, "sacha")
+        XCTAssertEqual(login(in: 60).id, "company")
+    }
+
+    func testAnExpiryIsReadFromTheHelpersOwnFormat() {
+        let emitted = "2026-07-29T09:56:19Z"
+        let decoded = SSOLogin(HelperLogin(label: "company", profiles: [], expires: emitted))
+        let justBefore = Date(timeIntervalSince1970: 1_785_318_979 - 22 * 60)
+
+        XCTAssertNotNil(decoded.expires, "this is exactly what the Go side writes")
+        XCTAssertEqual(decoded.status(at: justBefore), "signed in · 22m left")
+    }
+
+    func testARenewableTokenShowsNoCountdown() {
+        let renewable = SSOLogin(
+            label: "company", profiles: ["a"], expires: now.addingTimeInterval(-60), refreshable: true)
+
+        XCTAssertTrue(
+            renewable.signedIn(at: now),
+            "the SDK renews this silently — connecting works long after expiresAt")
+        XCTAssertEqual(
+            renewable.status(at: now), "signed in",
+            "counting down to the access token expiry would be a lie")
+    }
+
+    func testARenewableTokenThatIsStillFreshAlsoShowsNoCountdown() {
+        let renewable = SSOLogin(
+            label: "company", expires: now.addingTimeInterval(3600), refreshable: true)
+        XCTAssertEqual(renewable.status(at: now), "signed in")
+    }
+
+    func testTheWireCarriesRefreshability() {
+        let decoded = SSOLogin(
+            HelperLogin(label: "s", profiles: [], expires: nil, refreshable: true))
+        XCTAssertTrue(decoded.refreshable)
+        XCTAssertTrue(decoded.signedIn(at: now))
+
+        let older = SSOLogin(HelperLogin(label: "s", profiles: [], expires: nil))
+        XCTAssertFalse(older.refreshable, "a helper that does not send the field is not refreshable")
+    }
+
+    func testAFailedCheckOverridesAHopefulCache() {
+        let renewable = SSOLogin(
+            label: "company", expires: now.addingTimeInterval(3600), refreshable: true)
+
+        XCTAssertEqual(
+            renewable.status(at: now, check: .expired), "sign-in needed",
+            "the refresh token dies with the Identity Center session, which the cache never records")
+        XCTAssertFalse(renewable.signedIn(at: now, check: .expired))
+    }
+
+    func testAPassedCheckOverridesAnExpiredCache() {
+        let stale = SSOLogin(label: "company", expires: now.addingTimeInterval(-9999))
+
+        XCTAssertTrue(stale.signedIn(at: now, check: .valid))
+        XCTAssertEqual(stale.status(at: now, check: .valid), "signed in")
+    }
+
+    func testAnUnknownCheckFallsBackToTheCache() {
+        let renewable = SSOLogin(label: "company", refreshable: true)
+        XCTAssertEqual(renewable.status(at: now, check: .unknown), "signed in")
+
+        let dead = SSOLogin(label: "company", expires: now.addingTimeInterval(-1))
+        XCTAssertEqual(dead.status(at: now, check: .unknown), "signed out")
+    }
+
+    func testTheCheckStateDecodesFromTheWire() {
+        XCTAssertEqual(LoginCheck("valid"), .valid)
+        XCTAssertEqual(LoginCheck("expired"), .expired)
+        XCTAssertEqual(LoginCheck("unknown"), .unknown)
+        XCTAssertEqual(LoginCheck(nil), .unknown)
+        XCTAssertEqual(LoginCheck("something new"), .unknown, "a newer helper must not crash us")
+    }
+
+    func testTheCountdownFallsAsTimePasses() {
+        let one = login(in: 3600)
+        XCTAssertEqual(one.status(at: now), "signed in · 1h 0m left")
+        XCTAssertEqual(one.status(at: now.addingTimeInterval(1800)), "signed in · 30m left")
+        XCTAssertEqual(
+            one.status(at: now.addingTimeInterval(3601)), "signed out",
+            "the row must flip on its own once the token lapses")
     }
 }

@@ -335,30 +335,30 @@ final class AppModelTests: XCTestCase {
         m.handle(
             HelperMessage(
                 event: "logins",
-                logins: [HelperLogin(label: "sacha", profiles: ["a", "b"], expires: nil)]))
+                logins: [HelperLogin(label: "company", profiles: ["a", "b"], expires: nil)]))
 
-        XCTAssertEqual(m.logins.map(\.label), ["sacha"])
+        XCTAssertEqual(m.logins.map(\.label), ["company"])
         XCTAssertEqual(m.logins[0].profiles, ["a", "b"])
     }
 
     @MainActor func testSignInMarksTheLoginBusyUntilTheHelperAnswers() {
         let m = model()
-        m.logins = [SSOLogin(label: "sacha")]
+        m.logins = [SSOLogin(label: "company")]
         m.signIn(m.logins[0])
 
-        XCTAssertEqual(m.signingIn, "sacha")
+        XCTAssertEqual(m.signingIn, "company")
         XCTAssertNil(m.signInError)
 
-        m.handle(HelperMessage(event: "ssoLogin", detail: "sacha"))
+        m.handle(HelperMessage(event: "ssoLogin", detail: "company"))
         XCTAssertNil(m.signingIn)
         XCTAssertNil(m.signInError)
     }
 
     @MainActor func testAFailedSignInReportsAndClearsBusy() {
         let m = model()
-        m.logins = [SSOLogin(label: "sacha")]
+        m.logins = [SSOLogin(label: "company")]
         m.signIn(m.logins[0])
-        m.handle(HelperMessage(event: "ssoLogin", detail: "sacha", error: "the AWS CLI is not installed"))
+        m.handle(HelperMessage(event: "ssoLogin", detail: "company", error: "the AWS CLI is not installed"))
 
         XCTAssertNil(m.signingIn)
         XCTAssertEqual(m.signInError, "the AWS CLI is not installed")
@@ -366,28 +366,80 @@ final class AppModelTests: XCTestCase {
 
     @MainActor func testASecondSignInIsIgnoredWhileOneIsRunning() {
         let m = model()
-        m.logins = [SSOLogin(label: "sacha"), SSOLogin(label: "other")]
+        m.logins = [SSOLogin(label: "company"), SSOLogin(label: "other")]
         m.signIn(m.logins[0])
         m.signIn(m.logins[1])
 
-        XCTAssertEqual(m.signingIn, "sacha", "double-clicking must not open two browser flows")
+        XCTAssertEqual(m.signingIn, "company", "double-clicking must not open two browser flows")
     }
 
     @MainActor func testAnotherLoginsResultDoesNotClearTheRunningOne() {
         let m = model()
-        m.logins = [SSOLogin(label: "sacha"), SSOLogin(label: "other")]
+        m.logins = [SSOLogin(label: "company"), SSOLogin(label: "other")]
         m.signIn(m.logins[0])
         m.handle(HelperMessage(event: "ssoLogin", detail: "other", error: "stale"))
 
-        XCTAssertEqual(m.signingIn, "sacha")
+        XCTAssertEqual(m.signingIn, "company")
         XCTAssertNil(m.signInError, "a result for a different login is not this one's failure")
+    }
+
+    @MainActor func testALoginCheckIsRecordedAgainstItsLabel() {
+        let m = model()
+        m.handle(HelperMessage(event: "loginCheck", detail: "company", state: "expired"))
+
+        XCTAssertEqual(m.checks["company"], .expired)
+        XCTAssertEqual(m.check(for: SSOLogin(label: "company")), .expired)
+        XCTAssertEqual(m.check(for: SSOLogin(label: "other")), .unknown)
+    }
+
+    @MainActor func testAChecksIsNotRepeatedWithinTheInterval() {
+        let m = model()
+        m.logins = [SSOLogin(label: "company")]
+        let start = Date()
+
+        m.checkLogins(now: start)
+        m.handle(HelperMessage(event: "loginCheck", detail: "company", state: "valid"))
+        m.checks["company"] = nil
+
+        m.checkLogins(now: start.addingTimeInterval(AppModel.loginCheckInterval - 1))
+        XCTAssertNil(m.checks["company"], "a GetCallerIdentity per panel open would be wasteful")
+
+        m.checkLogins(now: start.addingTimeInterval(AppModel.loginCheckInterval + 1))
+        m.handle(HelperMessage(event: "loginCheck", detail: "company", state: "valid"))
+        XCTAssertEqual(m.checks["company"], .valid, "but it must run again once it is stale")
+    }
+
+    @MainActor func testASuccessfulSignInForcesAFreshCheck() {
+        let m = model()
+        m.logins = [SSOLogin(label: "company")]
+        m.handle(HelperMessage(event: "loginCheck", detail: "company", state: "expired"))
+        m.signIn(m.logins[0])
+        m.handle(HelperMessage(event: "ssoLogin", detail: "company"))
+
+        XCTAssertNil(
+            m.checks["company"],
+            "the stale verdict must not outlive the sign-in that fixed it")
+
+        m.checkLogins()
+        m.handle(HelperMessage(event: "loginCheck", detail: "company", state: "valid"))
+        XCTAssertEqual(m.checks["company"], .valid)
+    }
+
+    @MainActor func testAFailedSignInKeepsTheOldVerdict() {
+        let m = model()
+        m.logins = [SSOLogin(label: "company")]
+        m.handle(HelperMessage(event: "loginCheck", detail: "company", state: "expired"))
+        m.signIn(m.logins[0])
+        m.handle(HelperMessage(event: "ssoLogin", detail: "company", error: "boom"))
+
+        XCTAssertEqual(m.checks["company"], .expired, "nothing was fixed, so nothing changed")
     }
 
     @MainActor func testStartingASignInClearsTheLastComplaint() {
         let m = model()
-        m.logins = [SSOLogin(label: "sacha")]
+        m.logins = [SSOLogin(label: "company")]
         m.signIn(m.logins[0])
-        m.handle(HelperMessage(event: "ssoLogin", detail: "sacha", error: "boom"))
+        m.handle(HelperMessage(event: "ssoLogin", detail: "company", error: "boom"))
         m.signIn(m.logins[0])
 
         XCTAssertNil(m.signInError)

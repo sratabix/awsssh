@@ -1,22 +1,33 @@
 import Foundation
 
+enum LoginCheck: String {
+    case unknown, valid, expired
+
+    init(_ raw: String?) {
+        self = LoginCheck(rawValue: raw ?? "") ?? .unknown
+    }
+}
+
 struct SSOLogin: Identifiable, Equatable {
     var label: String
     var profiles: [String]
     var expires: Date?
+    var refreshable: Bool
 
     var id: String { label }
 
-    init(label: String, profiles: [String] = [], expires: Date? = nil) {
+    init(label: String, profiles: [String] = [], expires: Date? = nil, refreshable: Bool = false) {
         self.label = label
         self.profiles = profiles
         self.expires = expires
+        self.refreshable = refreshable
     }
 
     init(_ wire: HelperLogin) {
         label = wire.label
         profiles = wire.profiles ?? []
         expires = wire.expires.flatMap(SSOLogin.parse)
+        refreshable = wire.refreshable ?? false
     }
 
     static func parse(_ value: String) -> Date? {
@@ -26,13 +37,21 @@ struct SSOLogin: Identifiable, Equatable {
         return formatter.date(from: value)
     }
 
-    func signedIn(at now: Date) -> Bool {
+    func signedIn(at now: Date, check: LoginCheck = .unknown) -> Bool {
+        switch check {
+        case .valid: return true
+        case .expired: return false
+        case .unknown: break
+        }
+        if refreshable { return true }
         guard let expires else { return false }
         return expires > now
     }
 
-    func status(at now: Date) -> String {
-        guard let expires, expires > now else { return "signed out" }
+    func status(at now: Date, check: LoginCheck = .unknown) -> String {
+        if check == .expired { return "sign-in needed" }
+        guard signedIn(at: now, check: check) else { return "signed out" }
+        guard !refreshable, let expires, expires > now else { return "signed in" }
         return "signed in · \(SSOLogin.remaining(expires.timeIntervalSince(now))) left"
     }
 

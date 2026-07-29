@@ -4,6 +4,8 @@ import AppKit
 @MainActor
 final class AppModel: ObservableObject {
     static let reconnectCooldown: TimeInterval = 15
+    static let loginPollInterval: TimeInterval = 60
+    static let loginCheckInterval: TimeInterval = 300
 
     @Published var forwards: [Forward] = []
     @Published var states: [Int: EntryState] = [:]
@@ -18,6 +20,7 @@ final class AppModel: ObservableObject {
     @Published var expandedError: Int?
     @Published var importError: String?
     @Published var logins: [SSOLogin] = []
+    @Published var checks: [String: LoginCheck] = [:]
     @Published var signingIn: String?
     @Published var signInError: String?
     @Published var showingSettings = false
@@ -37,6 +40,8 @@ final class AppModel: ObservableObject {
     private var wakeObserver: NSObjectProtocol?
     private let network = NetworkMonitor()
     private var lastReconnect: Date?
+    private var loginPoll: Timer?
+    private var lastChecked: [String: Date] = [:]
 
     init(attached: Bool = true) {
         self.attached = attached
@@ -54,7 +59,7 @@ final class AppModel: ObservableObject {
         helper.onMessage = { [weak self] msg in self?.handle(msg) }
         helper.start()
         helper.send(HelperCommand(cmd: "profiles"))
-        helper.send(HelperCommand(cmd: "logins"))
+        refreshLogins()
 
         HotKeyCenter.shared.onFire = { [weak self] id in
             guard let self, let forward = self.forwards.first(where: { $0.id == id }) else { return }
@@ -68,18 +73,47 @@ final class AppModel: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.reconnectLiveForwards(reason: .sleep) }
+            Task { @MainActor in
+                self?.refreshLogins()
+                self?.reconnectLiveForwards(reason: .sleep)
+            }
         }
 
         network.onChange = { [weak self] in self?.reconnectLiveForwards(reason: .network) }
         network.start()
+
+        loginPoll = Timer.scheduledTimer(
+            withTimeInterval: AppModel.loginPollInterval,
+            repeats: true
+        ) { [weak self] _ in
+            Task { @MainActor in self?.refreshLogins() }
+        }
     }
 
     deinit {
+        loginPoll?.invalidate()
         if let wakeObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
         }
     }
+
+    func refreshLogins() {
+        helper.send(HelperCommand(cmd: "logins"))
+    }
+
+    func checkLogins(now: Date = Date()) {
+        for login in logins {
+            if let last = lastChecked[login.label],
+                now.timeIntervalSince(last) < Self.loginCheckInterval
+            {
+                continue
+            }
+            lastChecked[login.label] = now
+            helper.send(HelperCommand(cmd: "checkLogin", login: login.label))
+        }
+    }
+
+    func check(for login: SSOLogin) -> LoginCheck { checks[login.label] ?? .unknown }
 
     private func syncHotKeys() {
         guard attached else { return }
@@ -303,7 +337,7 @@ final class AppModel: ObservableObject {
 
     func refreshIfChanged() {
         helper.send(HelperCommand(cmd: "profiles"))
-        helper.send(HelperCommand(cmd: "logins"))
+        refreshLogins()
 
         guard !showingForm, pendingDelete == nil else { return }
         guard let onDisk = Store.stamp(), onDisk != stamp else { return }
@@ -387,10 +421,19 @@ final class AppModel: ObservableObject {
             profiles = msg.profiles ?? []
         case "logins":
             logins = (msg.logins ?? []).map(SSOLogin.init)
+            checkLogins()
+        case "loginCheck":
+            if let label = msg.detail {
+                checks[label] = LoginCheck(msg.state)
+            }
         case "ssoLogin":
             if signingIn == nil || signingIn == msg.detail {
                 signingIn = nil
                 signInError = msg.error
+            }
+            if msg.error == nil, let label = msg.detail {
+                checks[label] = nil
+                lastChecked[label] = nil
             }
         default:
             break

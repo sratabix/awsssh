@@ -32,9 +32,10 @@ type forwardSpec struct {
 }
 
 type loginInfo struct {
-	Label    string   `json:"label"`
-	Profiles []string `json:"profiles"`
-	Expires  string   `json:"expires,omitempty"`
+	Label       string   `json:"label"`
+	Profiles    []string `json:"profiles"`
+	Expires     string   `json:"expires,omitempty"`
+	Refreshable bool     `json:"refreshable,omitempty"`
 }
 
 type message struct {
@@ -44,6 +45,7 @@ type message struct {
 	Error    string      `json:"error,omitempty"`
 	Profiles []string    `json:"profiles,omitempty"`
 	Logins   []loginInfo `json:"logins,omitempty"`
+	State    string      `json:"state,omitempty"`
 }
 
 type output struct {
@@ -140,21 +142,46 @@ func handle(
 			defer background.Done()
 			signIn(ctx, c.Login, out)
 		}()
+	case "checkLogin":
+		background.Add(1)
+		go func() {
+			defer background.Done()
+			checkLogin(ctx, c.Login, out)
+		}()
 	default:
 		out.send(message{Event: "error", Error: "unknown cmd: " + c.Cmd})
 	}
 }
 
 var (
-	listLogins = awsx.Logins
-	ssoLogin   = awsx.RunSSOLogin
+	listLogins   = awsx.Logins
+	ssoLogin     = awsx.RunSSOLogin
+	loginChecker = awsx.CheckLogin
 )
+
+func checkLogin(ctx context.Context, label string, out *output) {
+	for _, login := range listLogins() {
+		if login.Label() == label {
+			out.send(message{
+				Event:  "loginCheck",
+				Detail: label,
+				State:  string(loginChecker(ctx, login)),
+			})
+			return
+		}
+	}
+	out.send(message{Event: "loginCheck", Detail: label, State: string(awsx.LoginUnknown)})
+}
 
 func loginList() message {
 	found := listLogins()
 	infos := make([]loginInfo, 0, len(found))
 	for _, login := range found {
-		info := loginInfo{Label: login.Label(), Profiles: login.Profiles}
+		info := loginInfo{
+			Label:       login.Label(),
+			Profiles:    login.Profiles,
+			Refreshable: login.Refreshable,
+		}
 		if !login.Expires.IsZero() {
 			info.Expires = login.Expires.Format(time.RFC3339)
 		}

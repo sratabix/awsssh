@@ -20,6 +20,7 @@ struct HelperLogin: Codable {
     var label: String
     var profiles: [String]?
     var expires: String?
+    var refreshable: Bool?
 }
 
 struct HelperMessage: Codable {
@@ -29,6 +30,7 @@ struct HelperMessage: Codable {
     var error: String?
     var profiles: [String]?
     var logins: [HelperLogin]?
+    var state: String?
 }
 
 final class Helper {

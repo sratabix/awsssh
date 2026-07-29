@@ -63,9 +63,13 @@ func New(ctx context.Context, profile, region string) (*Client, error) {
 	}, nil
 }
 
-func (c *Client) Verify(ctx context.Context) error {
+func (c *Client) callerIdentity(ctx context.Context) error {
 	_, err := c.sts.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
-	return Diagnose(c.Profile, err)
+	return err
+}
+
+func (c *Client) Verify(ctx context.Context) error {
+	return Diagnose(c.Profile, c.callerIdentity(ctx))
 }
 
 func (c *Client) Lookup(ctx context.Context, filter string) ([]Instance, error) {

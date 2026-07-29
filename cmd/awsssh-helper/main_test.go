@@ -282,11 +282,56 @@ func stubLogins(t *testing.T, found []awsx.Login, run func(context.Context, awsx
 	t.Cleanup(func() { listLogins, ssoLogin = previousList, previousRun })
 }
 
+func stubChecker(t *testing.T, state awsx.LoginState) {
+	t.Helper()
+	previous := loginChecker
+	loginChecker = func(context.Context, awsx.Login) awsx.LoginState { return state }
+	t.Cleanup(func() { loginChecker = previous })
+}
+
+func TestCheckLoginReportsTheVerdict(t *testing.T) {
+	stubLogins(t, sharedSession(), nil)
+	stubChecker(t, awsx.LoginExpired)
+
+	m, ok := firstWithEvent(runServe(t, `{"cmd":"checkLogin","login":"company"}`+"\n"), "loginCheck")
+	if !ok {
+		t.Fatal("no loginCheck message")
+	}
+	if m.State != "expired" {
+		t.Errorf("State = %q, want expired", m.State)
+	}
+	if m.Detail != "company" {
+		t.Errorf("Detail = %q, want the login it was about", m.Detail)
+	}
+}
+
+func TestCheckLoginOnAnUnknownLabelIsUnknown(t *testing.T) {
+	stubLogins(t, sharedSession(), nil)
+	stubChecker(t, awsx.LoginValid)
+
+	m, _ := firstWithEvent(runServe(t, `{"cmd":"checkLogin","login":"nope"}`+"\n"), "loginCheck")
+	if m.State != "unknown" {
+		t.Errorf("State = %q, want unknown rather than a verdict about nothing", m.State)
+	}
+}
+
+func TestCheckLoginPassesTheVerdictThrough(t *testing.T) {
+	for _, want := range []awsx.LoginState{awsx.LoginValid, awsx.LoginExpired, awsx.LoginUnknown} {
+		stubLogins(t, sharedSession(), nil)
+		stubChecker(t, want)
+
+		m, _ := firstWithEvent(runServe(t, `{"cmd":"checkLogin","login":"company"}`+"\n"), "loginCheck")
+		if m.State != string(want) {
+			t.Errorf("State = %q, want %q", m.State, want)
+		}
+	}
+}
+
 func sharedSession() []awsx.Login {
 	return []awsx.Login{{
-		Session:  "sacha",
+		Session:  "company",
 		StartURL: "https://example.awsapps.com/start",
-		Profiles: []string{"Atabase", "Atabix"},
+		Profiles: []string{"dev", "prod"},
 		Expires:  time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC),
 	}}
 }
@@ -301,7 +346,7 @@ func TestServeListsSSOLogins(t *testing.T) {
 	if len(m.Logins) != 1 {
 		t.Fatalf("Logins = %+v, want one", m.Logins)
 	}
-	if m.Logins[0].Label != "sacha" {
+	if m.Logins[0].Label != "company" {
 		t.Errorf("Label = %q, want the session name", m.Logins[0].Label)
 	}
 	if m.Logins[0].Expires != "2030-01-02T03:04:05Z" {
@@ -313,7 +358,7 @@ func TestServeListsSSOLogins(t *testing.T) {
 }
 
 func TestALoginWithNoCachedTokenReportsNoExpiry(t *testing.T) {
-	stubLogins(t, []awsx.Login{{Session: "sacha", Profiles: []string{"a"}}}, nil)
+	stubLogins(t, []awsx.Login{{Session: "company", Profiles: []string{"a"}}}, nil)
 
 	m, _ := firstWithEvent(runServe(t, `{"cmd":"logins"}`+"\n"), "logins")
 	if m.Logins[0].Expires != "" {
@@ -328,9 +373,9 @@ func TestSSOLoginRunsTheMatchingLoginAndRefreshes(t *testing.T) {
 		return nil
 	})
 
-	messages := runServe(t, `{"cmd":"ssoLogin","login":"sacha"}`+"\n")
+	messages := runServe(t, `{"cmd":"ssoLogin","login":"company"}`+"\n")
 
-	if len(ran) != 1 || ran[0] != "sso login --profile Atabase" {
+	if len(ran) != 1 || ran[0] != "sso login --profile dev" {
 		t.Fatalf("ran = %v, want one aws sso login for a profile of that session", ran)
 	}
 	m, ok := firstWithEvent(messages, "ssoLogin")
@@ -350,14 +395,14 @@ func TestSSOLoginReportsAFailure(t *testing.T) {
 		return errors.New("the AWS CLI is not installed")
 	})
 
-	m, ok := firstWithEvent(runServe(t, `{"cmd":"ssoLogin","login":"sacha"}`+"\n"), "ssoLogin")
+	m, ok := firstWithEvent(runServe(t, `{"cmd":"ssoLogin","login":"company"}`+"\n"), "ssoLogin")
 	if !ok {
 		t.Fatal("no ssoLogin message")
 	}
 	if m.Error != "the AWS CLI is not installed" {
 		t.Errorf("Error = %q, want the runner's message", m.Error)
 	}
-	if m.Detail != "sacha" {
+	if m.Detail != "company" {
 		t.Errorf("Detail = %q, want the login it was about", m.Detail)
 	}
 }
@@ -384,7 +429,7 @@ func TestServeWaitsForASignInBeforeShuttingDown(t *testing.T) {
 		return nil
 	})
 
-	if _, ok := firstWithEvent(runServe(t, `{"cmd":"ssoLogin","login":"sacha"}`+"\n"), "ssoLogin"); !ok {
+	if _, ok := firstWithEvent(runServe(t, `{"cmd":"ssoLogin","login":"company"}`+"\n"), "ssoLogin"); !ok {
 		t.Error("stdin EOF must not drop a sign-in that is still running")
 	}
 }

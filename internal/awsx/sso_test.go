@@ -1,10 +1,14 @@
 package awsx
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/aws/smithy-go"
 )
 
 func ssoCache(t *testing.T, files map[string]string) {
@@ -25,17 +29,23 @@ func token(startURL, expires string) string {
 		`"expiresAt":"` + expires + `"}`
 }
 
+func refreshableToken(startURL, expires, registrationExpires string) string {
+	return `{"startUrl":"` + startURL + `","accessToken":"secret","region":"eu-central-1",` +
+		`"expiresAt":"` + expires + `","refreshToken":"renew",` +
+		`"registrationExpiresAt":"` + registrationExpires + `"}`
+}
+
 const sessionConfig = `
-[sso-session sacha]
+[sso-session company]
 sso_start_url = https://example.awsapps.com/start
 sso_region = eu-central-1
 
-[profile Atabase]
-sso_session = sacha
+[profile dev]
+sso_session = company
 sso_account_id = 1
 
-[profile Atabix]
-sso_session = sacha
+[profile prod]
+sso_session = company
 sso_account_id = 2
 
 [profile keys-only]
@@ -50,10 +60,10 @@ func TestLoginsGroupProfilesBySSOSession(t *testing.T) {
 	if len(logins) != 1 {
 		t.Fatalf("want one login for one shared session, got %d: %+v", len(logins), logins)
 	}
-	if logins[0].Label() != "sacha" {
+	if logins[0].Label() != "company" {
 		t.Errorf("Label() = %q, want the session name", logins[0].Label())
 	}
-	if got := logins[0].Profiles; len(got) != 2 || got[0] != "Atabase" || got[1] != "Atabix" {
+	if got := logins[0].Profiles; len(got) != 2 || got[0] != "dev" || got[1] != "prod" {
 		t.Errorf("Profiles = %v, want both SSO profiles and not the keys-only one", got)
 	}
 }
@@ -124,7 +134,7 @@ func TestArgsUseAProfileTheUserAlreadyHas(t *testing.T) {
 	ssoCache(t, nil)
 
 	got := Logins()[0].Args()
-	want := []string{"sso", "login", "--profile", "Atabase"}
+	want := []string{"sso", "login", "--profile", "dev"}
 	if len(got) != len(want) {
 		t.Fatalf("Args() = %v, want %v", got, want)
 	}
@@ -136,9 +146,9 @@ func TestArgsUseAProfileTheUserAlreadyHas(t *testing.T) {
 }
 
 func TestArgsFallBackToTheSessionWithoutProfiles(t *testing.T) {
-	login := Login{Session: "sacha"}
+	login := Login{Session: "company"}
 	got := login.Args()
-	if len(got) != 4 || got[2] != "--sso-session" || got[3] != "sacha" {
+	if len(got) != 4 || got[2] != "--sso-session" || got[3] != "company" {
 		t.Errorf("Args() = %v, want an --sso-session login", got)
 	}
 }
@@ -213,6 +223,116 @@ func TestParseExpiryAcceptsBothLayoutsTheCLIHasWritten(t *testing.T) {
 func TestSignedInIsFalseWithoutTheToken(t *testing.T) {
 	if (Login{}).SignedIn(time.Now()) {
 		t.Error("no cached token means signed out")
+	}
+}
+
+func TestARefreshableTokenIsReportedAsSuch(t *testing.T) {
+	awsFiles(t, sessionConfig, "")
+	ssoCache(t, map[string]string{
+		"session.json": refreshableToken(
+			"https://example.awsapps.com/start", "2030-01-02T03:04:05Z", "2031-01-01T00:00:00Z"),
+	})
+
+	if !Logins()[0].Refreshable {
+		t.Error("a refreshToken with a live registration means the SDK renews it silently")
+	}
+}
+
+func TestAnExpiredAccessTokenIsStillSignedInWhenItCanRenew(t *testing.T) {
+	login := Login{
+		Expires:     time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
+		Refreshable: true,
+	}
+	if !login.SignedIn(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)) {
+		t.Error("expiresAt is the access token, not the session; connecting still works")
+	}
+}
+
+func TestARefreshTokenWithADeadRegistrationDoesNotCount(t *testing.T) {
+	awsFiles(t, sessionConfig, "")
+	ssoCache(t, map[string]string{
+		"session.json": refreshableToken(
+			"https://example.awsapps.com/start", "2020-01-02T03:04:05Z", "2020-06-01T00:00:00Z"),
+	})
+
+	login := Logins()[0]
+	if login.Refreshable {
+		t.Error("the renewal cannot work once the client registration has lapsed")
+	}
+	if login.SignedIn(time.Now()) {
+		t.Error("an expired token that cannot renew is signed out")
+	}
+}
+
+func TestATokenWithNoRefreshTokenIsNotRefreshable(t *testing.T) {
+	awsFiles(t, sessionConfig, "")
+	ssoCache(t, map[string]string{
+		"session.json": token("https://example.awsapps.com/start", "2030-01-02T03:04:05Z"),
+	})
+
+	login := Logins()[0]
+	if login.Refreshable {
+		t.Error("without a refreshToken the expiry really is the cutoff")
+	}
+	if !login.SignedIn(time.Date(2029, 1, 1, 0, 0, 0, 0, time.UTC)) {
+		t.Error("still signed in until then, though")
+	}
+}
+
+func TestForbiddenProvesTheTokenWasAccepted(t *testing.T) {
+	err := fmt.Errorf("operation error STS: GetCallerIdentity, failed to retrieve credentials: %w",
+		&smithy.GenericAPIError{Code: "ForbiddenException", Message: "No access"})
+
+	if got := classify(err); got != LoginValid {
+		t.Errorf("classify(ForbiddenException) = %q, want valid — SSO answered, so the token is live", got)
+	}
+	if !needsLogin(err) {
+		t.Error(
+			"this is exactly why classify cannot reuse needsLogin: the wrapper says " +
+				"'failed to retrieve credentials' for a profile the user simply has no access to")
+	}
+}
+
+func TestARejectedTokenIsExpired(t *testing.T) {
+	for _, code := range []string{
+		"UnauthorizedException", "ExpiredToken", "ExpiredTokenException",
+		"InvalidGrantException", "InvalidClientTokenId",
+	} {
+		err := fmt.Errorf("failed to retrieve credentials: %w",
+			&smithy.GenericAPIError{Code: code, Message: "nope"})
+		if got := classify(err); got != LoginExpired {
+			t.Errorf("classify(%s) = %q, want expired", code, got)
+		}
+	}
+}
+
+func TestAnExpiredCachedTokenIsExpired(t *testing.T) {
+	if got := classify(errors.New("cached SSO token is expired")); got != LoginExpired {
+		t.Errorf("classify = %q, want expired", got)
+	}
+	if got := classify(errors.New("failed to refresh cached credentials")); got != LoginExpired {
+		t.Errorf("classify = %q, want expired", got)
+	}
+}
+
+func TestSuccessIsValidAndAnythingElseIsUnknown(t *testing.T) {
+	if got := classify(nil); got != LoginValid {
+		t.Errorf("classify(nil) = %q, want valid", got)
+	}
+	for _, err := range []error{
+		errors.New("dial tcp: lookup sts.eu-central-1.amazonaws.com: no such host"),
+		errors.New("context deadline exceeded"),
+		fmt.Errorf("%w", &smithy.GenericAPIError{Code: "Throttling", Message: "slow down"}),
+	} {
+		if got := classify(err); got != LoginUnknown {
+			t.Errorf("classify(%v) = %q, want unknown — being offline is not being signed out", err, got)
+		}
+	}
+}
+
+func TestCheckLoginWithNoProfilesIsUnknown(t *testing.T) {
+	if got := CheckLogin(t.Context(), Login{Session: "empty"}); got != LoginUnknown {
+		t.Errorf("CheckLogin = %q, want unknown with nothing to try", got)
 	}
 }
 

@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/aws/smithy-go"
 )
 
 const (
@@ -20,11 +22,12 @@ const (
 )
 
 type Login struct {
-	Session  string
-	StartURL string
-	Region   string
-	Profiles []string
-	Expires  time.Time
+	Session     string
+	StartURL    string
+	Region      string
+	Profiles    []string
+	Expires     time.Time
+	Refreshable bool
 }
 
 func (l Login) Label() string {
@@ -45,7 +48,7 @@ func (l Login) Args() []string {
 }
 
 func (l Login) SignedIn(now time.Time) bool {
-	return !l.Expires.IsZero() && l.Expires.After(now)
+	return l.Refreshable || (!l.Expires.IsZero() && l.Expires.After(now))
 }
 
 func Logins() []Login {
@@ -94,18 +97,88 @@ func Logins() []Login {
 		login.Profiles = append(login.Profiles, name)
 	}
 
-	tokens := cachedTokens()
+	tokens := cachedTokens(time.Now())
 	out := make([]Login, 0, len(order))
 	for _, login := range order {
 		if len(login.Profiles) == 0 {
 			continue
 		}
 		sort.Strings(login.Profiles)
-		login.Expires = tokens[login.StartURL]
+		token := tokens[login.StartURL]
+		login.Expires = token.expires
+		login.Refreshable = token.refreshable
 		out = append(out, *login)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Label() < out[j].Label() })
 	return out
+}
+
+type LoginState string
+
+const (
+	LoginUnknown LoginState = "unknown"
+	LoginValid   LoginState = "valid"
+	LoginExpired LoginState = "expired"
+)
+
+const checkProfileLimit = 3
+
+var tokenAccepted = map[string]bool{
+	"ForbiddenException":    true,
+	"AccessDenied":          true,
+	"AccessDeniedException": true,
+}
+
+var tokenRejected = map[string]bool{
+	"UnauthorizedException": true,
+	"ExpiredToken":          true,
+	"ExpiredTokenException": true,
+	"InvalidGrantException": true,
+	"InvalidClientTokenId":  true,
+}
+
+func CheckLogin(ctx context.Context, login Login) LoginState {
+	for i, profile := range login.Profiles {
+		if i == checkProfileLimit {
+			break
+		}
+		if state := checkProfile(ctx, profile, login.Region); state != LoginUnknown {
+			return state
+		}
+	}
+	return LoginUnknown
+}
+
+func checkProfile(ctx context.Context, profile, region string) LoginState {
+	client, err := New(ctx, profile, region)
+	if err != nil {
+		return LoginUnknown
+	}
+	return classify(client.callerIdentity(ctx))
+}
+
+func classify(err error) LoginState {
+	if err == nil {
+		return LoginValid
+	}
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		switch {
+		case tokenAccepted[apiErr.ErrorCode()]:
+			return LoginValid
+		case tokenRejected[apiErr.ErrorCode()]:
+			return LoginExpired
+		}
+	}
+	for _, signal := range []string{
+		"cached SSO token is expired",
+		"failed to refresh cached credentials",
+	} {
+		if strings.Contains(err.Error(), signal) {
+			return LoginExpired
+		}
+	}
+	return LoginUnknown
 }
 
 var loginRunning sync.Mutex
@@ -153,9 +226,16 @@ func lastMeaningfulLine(s string) string {
 }
 
 type cachedToken struct {
-	StartURL    string `json:"startUrl"`
-	AccessToken string `json:"accessToken"`
-	ExpiresAt   string `json:"expiresAt"`
+	StartURL              string `json:"startUrl"`
+	AccessToken           string `json:"accessToken"`
+	ExpiresAt             string `json:"expiresAt"`
+	RefreshToken          string `json:"refreshToken"`
+	RegistrationExpiresAt string `json:"registrationExpiresAt"`
+}
+
+type sessionToken struct {
+	expires     time.Time
+	refreshable bool
 }
 
 func ssoCacheDir() string {
@@ -163,14 +243,14 @@ func ssoCacheDir() string {
 	return filepath.Join(home, ".aws", "sso", "cache")
 }
 
-func cachedTokens() map[string]time.Time {
+func cachedTokens(now time.Time) map[string]sessionToken {
 	dir := ssoCacheDir()
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil
 	}
 
-	out := map[string]time.Time{}
+	out := map[string]sessionToken{}
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
@@ -186,8 +266,13 @@ func cachedTokens() map[string]time.Time {
 		if token.StartURL == "" || token.AccessToken == "" {
 			continue
 		}
-		if expires := parseExpiry(token.ExpiresAt); expires.After(out[token.StartURL]) {
-			out[token.StartURL] = expires
+		found := sessionToken{
+			expires: parseExpiry(token.ExpiresAt),
+			refreshable: token.RefreshToken != "" &&
+				parseExpiry(token.RegistrationExpiresAt).After(now),
+		}
+		if found.expires.After(out[token.StartURL].expires) {
+			out[token.StartURL] = found
 		}
 	}
 	return out
