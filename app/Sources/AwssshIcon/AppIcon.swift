@@ -5,42 +5,55 @@ public enum AppIcon {
 
     private static let badgeSymbolName = "exclamationmark.circle.fill"
     private static let tint = NSColor(srgbRed: 0.20, green: 0.52, blue: 0.90, alpha: 1)
+    private static let badgeRing: CGFloat = 1.2
+    private static let badgeOverlap: CGFloat = 4
+
+    public static let menuBarHeight: CGFloat = 16
 
     public static func menuBar(attention: Bool) -> NSImage {
-        let config = NSImage.SymbolConfiguration(pointSize: 15, weight: .regular)
+        let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .regular)
         guard
             let base = NSImage(systemSymbolName: symbolName, accessibilityDescription: "awsssh")?
                 .withSymbolConfiguration(config)
         else { return NSImage() }
+        clampToMenuBar(base)
         base.isTemplate = true
         guard attention else { return base }
 
-        let badgeConfig = NSImage.SymbolConfiguration(pointSize: 9, weight: .bold)
+        let badgeConfig = NSImage.SymbolConfiguration(pointSize: 7, weight: .bold)
         guard
             let badge = NSImage(systemSymbolName: badgeSymbolName, accessibilityDescription: nil)?
                 .withSymbolConfiguration(badgeConfig)
         else { return base }
 
-        let canvas = NSImage(size: NSSize(width: base.size.width + 3, height: base.size.height))
-        canvas.lockFocus()
-        defer { canvas.unlockFocus() }
+        let well = badge.size.width + badgeRing * 2
+        let size = NSSize(width: base.size.width - badgeOverlap + well, height: base.size.height)
 
-        base.draw(at: .zero, from: .zero, operation: .sourceOver, fraction: 1)
+        let canvas = NSImage(size: size, flipped: false) { _ in
+            base.draw(at: .zero, from: .zero, operation: .sourceOver, fraction: 1)
 
-        let badgeRect = NSRect(
-            x: canvas.size.width - badge.size.width,
-            y: 0,
-            width: badge.size.width,
-            height: badge.size.height)
-
-        NSGraphicsContext.current?.compositingOperation = .clear
-        NSBezierPath(ovalIn: badgeRect.insetBy(dx: -1.2, dy: -1.2)).fill()
-        NSGraphicsContext.current?.compositingOperation = .sourceOver
-        badge.draw(in: badgeRect, from: .zero, operation: .sourceOver, fraction: 1)
+            let wellRect = NSRect(x: size.width - well, y: 0, width: well, height: well)
+            NSGraphicsContext.current?.compositingOperation = .clear
+            NSBezierPath(ovalIn: wellRect).fill()
+            NSGraphicsContext.current?.compositingOperation = .sourceOver
+            badge.draw(
+                in: wellRect.insetBy(dx: badgeRing, dy: badgeRing),
+                from: .zero,
+                operation: .sourceOver,
+                fraction: 1)
+            return true
+        }
 
         canvas.isTemplate = true
         canvas.accessibilityDescription = "awsssh, attention needed"
         return canvas
+    }
+
+    private static func clampToMenuBar(_ image: NSImage) {
+        let height = image.size.height
+        guard height > menuBarHeight, height > 0 else { return }
+        let width = (image.size.width * menuBarHeight / height).rounded()
+        image.size = NSSize(width: width, height: menuBarHeight)
     }
 
     private static func render(size: CGFloat) -> NSImage? {

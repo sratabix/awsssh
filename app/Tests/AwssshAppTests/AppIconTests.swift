@@ -21,8 +21,35 @@ final class AppIconTests: XCTestCase {
         let plain = AppIcon.menuBar(attention: false).size
         let badged = AppIcon.menuBar(attention: true).size
 
-        XCTAssertGreaterThan(badged.width, plain.width, "the badge must not be drawn over the glyph")
+        XCTAssertGreaterThan(
+            badged.width - plain.width, 5,
+            "widening by less than the badge means the knockout eats the glyph instead of sitting beside it")
         XCTAssertEqual(badged.height, plain.height, "the menubar sets the height; only width may grow")
+    }
+
+    func testNeitherVariantBakesABitmap() {
+        for attention in [false, true] {
+            for rep in AppIcon.menuBar(attention: attention).representations {
+                XCTAssertEqual(
+                    rep.pixelsWide, 0,
+                    "attention: \(attention) — a baked rep pins the icon to one screen's scale factor")
+                XCTAssertEqual(rep.pixelsHigh, 0, "attention: \(attention)")
+            }
+        }
+    }
+
+    func testBothVariantsFitTheMenuBar() {
+        for attention in [false, true] {
+            XCTAssertLessThan(
+                AppIcon.menuBar(attention: attention).size.height, AppIcon.menuBarHeight + 0.001,
+                "attention: \(attention) — anything taller is clipped top and bottom, not scaled down")
+        }
+    }
+
+    func testTheHeightStaysInsideTheMenuBarsBudget() {
+        XCTAssertLessThan(
+            AppIcon.menuBarHeight, NSStatusBar.system.thickness - 3,
+            "a 22pt bar pads roughly 3pt top and bottom; a taller glyph is sliced flat")
     }
 
     func testBothVariantsHaveARealSize() {
