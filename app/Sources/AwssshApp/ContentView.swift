@@ -59,7 +59,7 @@ struct ContentView: View {
             if let err = model.importError {
                 Text(err).font(.caption).foregroundStyle(.orange)
             }
-            UpdateBadge(updates: model.updates)
+            UpdateBadge(updates: model.updates, installer: model.installer, running: model.runningCount)
             Divider()
             HStack {
                 Button(action: { model.beginAdd() }) {
@@ -83,16 +83,77 @@ struct ContentView: View {
 
 struct UpdateBadge: View {
     @ObservedObject var updates: UpdateChecker
+    @ObservedObject var installer: Installer
+    let running: Int
+
+    @State private var confirming = false
 
     var body: some View {
-        if let latest = updates.latestVersion {
-            HStack(spacing: 5) {
-                Image(systemName: "arrow.up.circle.fill").foregroundStyle(.blue)
-                Text("Update available · \(latest)").font(.caption)
-                Spacer()
-                Text("brew upgrade --cask awsssh")
-                    .font(.caption2.monospaced()).foregroundStyle(.secondary)
+        if let release = updates.available {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 5) {
+                    Image(systemName: "arrow.up.circle.fill").foregroundStyle(.blue)
+                    Text("Update available · \(release.version)").font(.caption)
+                    Spacer()
+                    controls(release)
+                }
+                if let status {
+                    Text(status.text)
+                        .font(.caption2)
+                        .foregroundStyle(status.warning ? Color.orange : Color.secondary)
+                        .lineLimit(3)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(idealWidth: 1, maxWidth: .infinity, alignment: .leading)
+                }
             }
+        }
+    }
+
+    @ViewBuilder private func controls(_ release: Release) -> some View {
+        if installer.busy {
+            ProgressView().controlSize(.small)
+        } else if confirming {
+            Button("Stop & update") {
+                confirming = false; installer.install(release)
+            }
+            .controlSize(.small)
+            Button("Cancel") { confirming = false }
+                .controlSize(.small)
+        } else if release.asset != nil {
+            if status?.warning == true {
+                Button("Dismiss") { installer.dismiss() }
+                    .controlSize(.small)
+            }
+            Button(status?.warning == true ? "Retry" : "Update") {
+                if running > 0 {
+                    confirming = true
+                } else {
+                    installer.install(release)
+                }
+            }
+            .controlSize(.small)
+            .help("Download \(release.version), verify it, and relaunch")
+        } else {
+            Text("brew upgrade --cask awsssh")
+                .font(.caption2.monospaced()).foregroundStyle(.secondary)
+        }
+    }
+
+    private var status: (text: String, warning: Bool)? {
+        switch installer.phase {
+        case .idle:
+            guard confirming else { return nil }
+            return ("\(running) running forward\(running == 1 ? "" : "s") will stop.", true)
+        case .resolving:
+            return ("Checking for the newest release…", false)
+        case .downloading(let version):
+            return ("Downloading \(version)…", false)
+        case .verifying:
+            return ("Verifying checksum and signature…", false)
+        case .installing:
+            return ("Replacing Awsssh and relaunching…", false)
+        case .failed(let message), .blocked(let message):
+            return (message, true)
         }
     }
 }

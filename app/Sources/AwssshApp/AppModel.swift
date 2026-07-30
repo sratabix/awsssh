@@ -32,6 +32,7 @@ final class AppModel: ObservableObject {
     }
 
     let updates = UpdateChecker()
+    let installer = Installer()
 
     private let helper = Helper()
     private let forms = FormWindowPresenter()
@@ -69,6 +70,11 @@ final class AppModel: ObservableObject {
             self.toggle(forward)
         }
         HotKeyCenter.shared.sync(forwards)
+
+        let checker = updates
+        installer.fetchLatest = { await checker.fetchLatest() }
+        installer.adopt = { checker.adopt($0) }
+        installer.quit = { [weak self] in self?.quit() }
         updates.start()
 
         wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(

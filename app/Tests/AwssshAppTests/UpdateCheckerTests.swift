@@ -91,4 +91,84 @@ extension UpdateCheckerTests {
     func testVersionIsNeverEmpty() {
         XCTAssertFalse(AppInfo.version.isEmpty)
     }
+
+    func testUserAgentCarriesOnlyTheAppVersion() {
+        XCTAssertEqual(AppInfo.userAgent, "Awsssh/" + AppInfo.version)
+    }
+}
+
+extension UpdateCheckerTests {
+    private func releaseJSON(
+        tag: String = "v0.4.2",
+        assetName: String = "Awsssh-0.4.2.zip",
+        digest: String? = "sha256:\(String(repeating: "a", count: 64))",
+        url: String = "https://github.com/sratabix/awsssh/releases/download/v0.4.2/Awsssh-0.4.2.zip",
+        prerelease: Bool = false
+    ) -> Data {
+        let digestField = digest.map { #""digest":"\#($0)","# } ?? ""
+        return Data(
+            """
+            {"tag_name":"\(tag)",
+             "prerelease":\(prerelease),
+             "html_url":"https://github.com/sratabix/awsssh/releases/tag/\(tag)",
+             "assets":[{"name":"\(assetName)",\(digestField)"browser_download_url":"\(url)"}]}
+            """.utf8
+        )
+    }
+
+    func testParseReleaseReadsVersionPageAndAsset() {
+        let release = UpdateChecker.parseRelease(releaseJSON())
+        XCTAssertEqual(release?.version, "0.4.2")
+        XCTAssertEqual(release?.page?.absoluteString, "https://github.com/sratabix/awsssh/releases/tag/v0.4.2")
+        XCTAssertEqual(release?.asset?.sha256, String(repeating: "a", count: 64))
+        XCTAssertEqual(
+            release?.asset?.url.absoluteString,
+            "https://github.com/sratabix/awsssh/releases/download/v0.4.2/Awsssh-0.4.2.zip"
+        )
+    }
+
+    func testParseReleaseDropsAPrerelease() {
+        XCTAssertNil(UpdateChecker.parseRelease(releaseJSON(prerelease: true)))
+    }
+
+    func testParseReleaseKeepsTheVersionButDropsAnUnusableAsset() {
+        let noDigest = UpdateChecker.parseRelease(releaseJSON(digest: nil))
+        XCTAssertEqual(noDigest?.version, "0.4.2")
+        XCTAssertNil(noDigest?.asset)
+
+        XCTAssertNil(UpdateChecker.parseRelease(releaseJSON(digest: "md5:abc"))?.asset)
+        XCTAssertNil(UpdateChecker.parseRelease(releaseJSON(digest: "sha256:abc"))?.asset)
+        XCTAssertNil(UpdateChecker.parseRelease(releaseJSON(assetName: "Awsssh-9.9.9.zip"))?.asset)
+        XCTAssertNil(UpdateChecker.parseRelease(releaseJSON(assetName: "Awsssh.zip"))?.asset)
+    }
+
+    func testParseReleaseRejectsAnAssetOffGitHub() {
+        let release = UpdateChecker.parseRelease(releaseJSON(url: "https://evil.example/Awsssh-0.4.2.zip"))
+        XCTAssertEqual(release?.version, "0.4.2")
+        XCTAssertNil(release?.asset)
+    }
+
+    func testParseReleaseRejectsAFullwidthDigestThatUIntWouldRefuse() {
+        let wide = "sha256:" + String(repeating: "ａ", count: 64)
+        XCTAssertNil(UpdateChecker.parseRelease(releaseJSON(digest: wide))?.asset)
+    }
+
+    func testParseReleaseAcceptsAnUppercaseDigest() {
+        let digest = "sha256:" + String(repeating: "AB", count: 32)
+        XCTAssertEqual(
+            UpdateChecker.parseRelease(releaseJSON(digest: digest))?.asset?.sha256,
+            String(repeating: "ab", count: 32)
+        )
+    }
+
+    @MainActor func testAvailableIsNilUntilAReleaseIsNewerThanTheRunningBuild() {
+        let checker = UpdateChecker()
+        XCTAssertNil(checker.available)
+
+        checker.adopt(Release(version: AppInfo.version, page: nil, asset: nil))
+        XCTAssertNil(checker.available)
+
+        checker.adopt(Release(version: "999.0.0", page: nil, asset: nil))
+        XCTAssertEqual(checker.available?.version, "999.0.0")
+    }
 }
