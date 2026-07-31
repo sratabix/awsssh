@@ -1129,4 +1129,66 @@ final class AppModelTests: XCTestCase {
         m.delete(m.forwards[0])
         XCTAssertNil(m.expandedError)
     }
+
+    @MainActor func testErroredListsOnlyForwardsInTheErrorState() {
+        let m = model()
+        m.forwards = [forward(1, port: "5432"), forward(2, port: "5433"), forward(3, port: "5434")]
+        m.handle(HelperMessage(event: "exited", id: 1, error: "boom"))
+        m.handle(HelperMessage(event: "started", id: 2))
+
+        XCTAssertEqual(m.errored.map(\.id), [1])
+    }
+
+    @MainActor func testDismissErrorsClearsEveryErroredForward() {
+        let m = model()
+        m.forwards = [forward(1, port: "5432"), forward(2, port: "5433"), forward(3, port: "5434")]
+        for id in [1, 2, 3] {
+            m.handle(HelperMessage(event: "exited", id: id, error: "boom \(id)"))
+        }
+        XCTAssertEqual(m.errored.count, 3)
+
+        m.dismissErrors(m.errored)
+
+        XCTAssertTrue(m.errored.isEmpty)
+        for id in [1, 2, 3] {
+            XCTAssertEqual(m.states[id]?.run, .stopped, "id \(id)")
+            XCTAssertEqual(m.states[id]?.error, "", "id \(id)")
+        }
+        XCTAssertFalse(m.needsAttention, "clearing the errors must clear the menubar badge too")
+    }
+
+    @MainActor func testDismissErrorsLeavesHealthyForwardsAlone() {
+        let m = model()
+        m.forwards = [forward(1, port: "5432"), forward(2, port: "5433")]
+        m.handle(HelperMessage(event: "exited", id: 1, error: "boom"))
+        m.handle(HelperMessage(event: "started", id: 2))
+
+        m.dismissErrors(m.forwards)
+
+        XCTAssertEqual(m.states[1]?.run, .stopped)
+        XCTAssertEqual(m.states[2]?.run, .running, "a running forward must not be stopped by a dismiss")
+    }
+
+    @MainActor func testDismissErrorsCollapsesTheExpandedErrorPanel() {
+        let m = model()
+        m.forwards = [forward(1, port: "5432"), forward(2, port: "5433")]
+        m.handle(HelperMessage(event: "exited", id: 1, error: "boom"))
+        m.handle(HelperMessage(event: "exited", id: 2, error: "boom"))
+        m.toggleErrorDetail(2)
+        XCTAssertEqual(m.expandedError, 2)
+
+        m.dismissErrors(m.errored)
+
+        XCTAssertNil(m.expandedError)
+    }
+
+    @MainActor func testDismissErrorsOnAnEmptyListIsANoOp() {
+        let m = model()
+        m.forwards = [forward(1, port: "5432")]
+        m.handle(HelperMessage(event: "exited", id: 1, error: "boom"))
+
+        m.dismissErrors([])
+
+        XCTAssertEqual(m.errored.count, 1, "dismissing nothing must not clear anything")
+    }
 }

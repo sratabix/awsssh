@@ -59,6 +59,17 @@ struct ContentView: View {
             if let err = model.importError {
                 Text(err).font(.caption).foregroundStyle(.orange)
             }
+            let errored = model.errored
+            if errored.count > 1 {
+                HStack(spacing: 5) {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                    Text("\(errored.count) forwards errored").font(.caption)
+                    Spacer()
+                    Button("Dismiss all") { model.dismissErrors(errored) }
+                        .controlSize(.small)
+                        .help("Clear every error and the menubar badge")
+                }
+            }
             UpdateBadge(updates: model.updates, installer: model.installer, running: model.runningCount)
             Divider()
             HStack {

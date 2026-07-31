@@ -159,6 +159,12 @@ final class AppModel: ObservableObject {
         }
     }
 
+    var errored: [Forward] { forwards.filter { state(for: $0).run == .error } }
+
+    func dismissErrors(_ list: [Forward]) {
+        for forward in list { dismissError(forward) }
+    }
+
     func copyToClipboard(_ text: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
