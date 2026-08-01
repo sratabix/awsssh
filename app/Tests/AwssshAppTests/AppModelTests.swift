@@ -1,3 +1,4 @@
+import AppKit
 import XCTest
 
 @testable import AwssshApp
@@ -1190,5 +1191,178 @@ final class AppModelTests: XCTestCase {
         m.dismissErrors([])
 
         XCTAssertEqual(m.errored.count, 1, "dismissing nothing must not clear anything")
+    }
+
+    @MainActor func testStopAllStopsEveryLiveForward() {
+        let m = model()
+        m.forwards = [forward(1, port: "5432"), forward(2, port: "5433"), forward(3, port: "5434")]
+        m.handle(HelperMessage(event: "started", id: 1))
+        m.handle(HelperMessage(event: "started", id: 2))
+
+        m.stopAll(m.forwards)
+
+        XCTAssertEqual(m.state(for: m.forwards[0]).run, .stopping)
+        XCTAssertEqual(m.state(for: m.forwards[1]).run, .stopping)
+        XCTAssertEqual(m.state(for: m.forwards[2]).run, .stopped, "an idle forward must be left alone")
+    }
+
+    @MainActor func testStopAllOnAnEmptyListIsANoOp() {
+        let m = model()
+        m.forwards = [forward(1, port: "5432")]
+        m.handle(HelperMessage(event: "started", id: 1))
+
+        m.stopAll([])
+
+        XCTAssertEqual(m.state(for: m.forwards[0]).run, .running)
+    }
+
+    @MainActor func testStopAllStopsAReconnectingForward() {
+        let m = model()
+        m.forwards = [forward(1, port: "5432")]
+        m.handle(HelperMessage(event: "started", id: 1))
+        m.reconnectLiveForwards(reason: .network, now: Date())
+        XCTAssertEqual(m.state(for: m.forwards[0]).run, .reconnecting)
+
+        m.stopAll(m.forwards)
+        XCTAssertEqual(
+            m.state(for: m.forwards[0]).run, .stopping,
+            "a reconnecting forward counts as live, so stopping it must take hold")
+    }
+
+    @MainActor func testStopAllLeavesAnErroredForwardAlone() {
+        let m = model()
+        m.forwards = [forward(1, port: "5432")]
+        m.handle(HelperMessage(event: "exited", id: 1, error: "boom"))
+
+        m.stopAll(m.forwards)
+
+        XCTAssertEqual(m.state(for: m.forwards[0]).run, .error, "stopping is not how an error is cleared")
+    }
+
+    @MainActor func testStartAllSkipsAPortAlreadyHeldByALiveForward() {
+        let m = model()
+        m.forwards = [forward(1, port: "5432"), forward(2, port: "5432")]
+        m.handle(HelperMessage(event: "started", id: 1))
+
+        m.startAll(m.forwards)
+
+        XCTAssertEqual(
+            m.state(for: m.forwards[1]).run, .stopped,
+            "two forwards on one port is supported; starting the second must be skipped quietly")
+        XCTAssertTrue(m.state(for: m.forwards[1]).error.isEmpty, "and must not raise an error")
+    }
+
+    @MainActor func testStartAllLeavesAlreadyRunningForwardsRunning() {
+        let m = model()
+        m.forwards = [forward(1, port: "5432")]
+        m.handle(HelperMessage(event: "started", id: 1))
+
+        m.startAll(m.forwards)
+
+        XCTAssertEqual(m.state(for: m.forwards[0]).run, .running)
+    }
+
+    @MainActor func testRefreshLoginsIsSafeWhenDetached() {
+        let m = model()
+        m.refreshLogins()
+        m.checkLogins()
+        XCTAssertTrue(m.logins.isEmpty)
+    }
+
+    @MainActor func testShareAndImportRoundTripThroughTheClipboard() {
+        let saved = NSPasteboard.general.string(forType: .string)
+        defer {
+            NSPasteboard.general.clearContents()
+            if let saved { NSPasteboard.general.setString(saved, forType: .string) }
+        }
+
+        let m = model()
+        var original = forward(1, port: "15432", name: "prod db")
+        original.profile = "prod"
+        original.region = "eu-west-1"
+        original.host = "db.internal"
+        original.color = "#FF453A"
+        original.group = "databases"
+        m.saveForm(original)
+        XCTAssertEqual(m.forwards.count, 1, "the fixture must actually be saved so nextID advances")
+
+        m.share(original)
+        m.importFromClipboard()
+
+        XCTAssertNil(m.importError)
+        XCTAssertTrue(m.showingForm, "an import opens the form so it goes through validation")
+        let imported = unwrapOrFail(m.editing)
+        XCTAssertEqual(imported?.name, "prod db")
+        XCTAssertEqual(imported?.host, "db.internal")
+        XCTAssertEqual(imported?.localPort, "15432")
+        XCTAssertEqual(imported?.color, "#FF453A")
+        XCTAssertEqual(imported?.group, "databases")
+        XCTAssertNotEqual(imported?.id, original.id, "the importer always gets a fresh id")
+    }
+
+    @MainActor func testImportFromAClipboardHoldingGarbageReportsAnError() {
+        let saved = NSPasteboard.general.string(forType: .string)
+        defer {
+            NSPasteboard.general.clearContents()
+            if let saved { NSPasteboard.general.setString(saved, forType: .string) }
+        }
+
+        let m = model()
+        m.copyToClipboard("this is not a forward")
+        m.importFromClipboard()
+
+        XCTAssertNotNil(m.importError)
+        XCTAssertFalse(m.showingForm, "a failed import must not open an empty form")
+    }
+
+    @MainActor func testImportFromAnEmptyClipboardReportsAnError() {
+        let saved = NSPasteboard.general.string(forType: .string)
+        defer {
+            NSPasteboard.general.clearContents()
+            if let saved { NSPasteboard.general.setString(saved, forType: .string) }
+        }
+
+        let m = model()
+        m.copyToClipboard("")
+        m.importFromClipboard()
+
+        XCTAssertNotNil(m.importError)
+        XCTAssertFalse(m.showingForm)
+    }
+
+    @MainActor func testShareClearsAStaleImportError() {
+        let saved = NSPasteboard.general.string(forType: .string)
+        defer {
+            NSPasteboard.general.clearContents()
+            if let saved { NSPasteboard.general.setString(saved, forType: .string) }
+        }
+
+        let m = model()
+        m.importShared("garbage")
+        XCTAssertNotNil(m.importError)
+
+        m.share(forward(1, port: "5432"))
+        XCTAssertNil(m.importError, "sharing is a fresh action; a previous import error must clear")
+    }
+
+    @MainActor func testCopyToClipboardPutsExactlyTheGivenText() {
+        let saved = NSPasteboard.general.string(forType: .string)
+        defer {
+            NSPasteboard.general.clearContents()
+            if let saved { NSPasteboard.general.setString(saved, forType: .string) }
+        }
+
+        let m = model()
+        m.copyToClipboard("session-manager-plugin exited with status 1")
+        XCTAssertEqual(
+            NSPasteboard.general.string(forType: .string),
+            "session-manager-plugin exited with status 1")
+    }
+}
+
+extension AppModelTests {
+    fileprivate func unwrapOrFail<T>(_ value: T?, file: StaticString = #file, line: UInt = #line) -> T? {
+        if value == nil { XCTFail("expected a value", file: file, line: line) }
+        return value
     }
 }

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -335,4 +336,243 @@ func TestSelectInstanceRejectsAnUnexpectedModel(t *testing.T) {
 
 func lipglossWidthForTest(s string) int {
 	return lipgloss.Width(s)
+}
+
+func TestTruncateNeverExceedsItsBudgetForWideRunes(t *testing.T) {
+	inputs := []string{
+		"日本語テスト環境",
+		"ünïcodé-näme",
+		"abcdefghijklmnop",
+		"a日b本c語d",
+		"emoji-🎉-in-the-middle",
+	}
+	for _, s := range inputs {
+		for n := 0; n <= lipgloss.Width(s)+2; n++ {
+			got := truncate(s, n)
+			if w := lipgloss.Width(got); w > n {
+				t.Errorf("truncate(%q, %d) = %q has width %d, over budget %d", s, n, got, w, n)
+			}
+		}
+	}
+}
+
+func TestTruncateNeverEmitsNULOrReplacementRunes(t *testing.T) {
+	inputs := []string{"日本語", "日本語テスト", "🎉🎉🎉", "a日本", "plain-ascii-name"}
+	for _, s := range inputs {
+		for n := 0; n <= lipgloss.Width(s)+2; n++ {
+			got := truncate(s, n)
+			if strings.ContainsRune(got, 0) {
+				t.Errorf("truncate(%q, %d) = %q contains a NUL byte", s, n, got)
+			}
+			if !utf8.ValidString(got) {
+				t.Errorf("truncate(%q, %d) = %q is not valid UTF-8", s, n, got)
+			}
+		}
+	}
+}
+
+func TestTruncateAtZeroAndOne(t *testing.T) {
+	if got := truncate("abcdef", 0); got != "" {
+		t.Errorf("a zero budget must produce nothing, got %q", got)
+	}
+	if got := truncate("abcdef", 1); got != "…" {
+		t.Errorf("a one-column budget leaves room only for the ellipsis, got %q", got)
+	}
+	if got := truncate("日本語", 1); got != "…" {
+		t.Errorf("a wide string in one column is just the ellipsis, got %q", got)
+	}
+}
+
+func TestTruncateIsIdentityAtExactlyTheBudget(t *testing.T) {
+	for _, s := range []string{"abcde", "日本語", "ünï"} {
+		w := lipgloss.Width(s)
+		if got := truncate(s, w); got != s {
+			t.Errorf("truncate(%q, %d) must not touch a string that already fits, got %q", s, w, got)
+		}
+		if got := truncate(s, w+1); got != s {
+			t.Errorf("truncate(%q, %d) must not touch a string under budget, got %q", s, w+1, got)
+		}
+	}
+}
+
+func TestTruncateAlwaysSignalsThatItCut(t *testing.T) {
+	s := "a-very-long-instance-name-indeed"
+	for n := 1; n < lipgloss.Width(s); n++ {
+		got := truncate(s, n)
+		if !strings.HasSuffix(got, "…") {
+			t.Errorf("truncate(%q, %d) = %q dropped the ellipsis", s, n, got)
+		}
+	}
+}
+
+func TestTruncateNegativeBudgetIsEmptyNotAPanic(t *testing.T) {
+	for _, n := range []int{-1, -5, -100} {
+		if got := truncate("anything", n); got != "" {
+			t.Errorf("truncate with budget %d must be empty, got %q", n, got)
+		}
+	}
+}
+
+func TestPadIsANoOpWhenAlreadyWideEnough(t *testing.T) {
+	for _, w := range []int{0, 1, 5} {
+		if got := pad("hello", w); got != "hello" {
+			t.Errorf("pad(%q, %d) = %q, must not shrink or alter", "hello", w, got)
+		}
+	}
+}
+
+func TestPadAccountsForWideRunes(t *testing.T) {
+	got := pad("日本", 6)
+	if w := lipgloss.Width(got); w != 6 {
+		t.Errorf("pad(%q, 6) has width %d, want 6", "日本", w)
+	}
+}
+
+func TestPadThenTruncateRoundTripsToTheSameWidth(t *testing.T) {
+	for _, s := range []string{"short", "a-much-longer-value", "日本語テスト"} {
+		for _, w := range []int{4, 8, 12} {
+			got := pad(truncate(s, w), w)
+			if lipgloss.Width(got) != w {
+				t.Errorf("pad(truncate(%q, %d), %d) = %q has width %d, want exactly %d",
+					s, w, w, got, lipgloss.Width(got), w)
+			}
+		}
+	}
+}
+
+func TestCursorMovesUpFromANonZeroPosition(t *testing.T) {
+	m := newInstanceModel(testInstances())
+	m = press(t, m, "down")
+	m = press(t, m, "down")
+	if m.cursor != 2 {
+		t.Fatalf("cursor = %d, want 2 before moving back up", m.cursor)
+	}
+
+	m = press(t, m, "up")
+	if m.cursor != 1 {
+		t.Errorf("cursor = %d, want 1 after one up", m.cursor)
+	}
+	m = press(t, m, "up")
+	if m.cursor != 0 {
+		t.Errorf("cursor = %d, want 0 after a second up", m.cursor)
+	}
+}
+
+func TestCursorUpAndDownAreSymmetric(t *testing.T) {
+	m := newInstanceModel(testInstances())
+	for range 2 {
+		m = press(t, m, "down")
+	}
+	for range 2 {
+		m = press(t, m, "up")
+	}
+	if m.cursor != 0 {
+		t.Errorf("cursor = %d, want to be back at the top", m.cursor)
+	}
+}
+
+func TestTheNameColumnNeverTakesMoreThanHalfTheWidth(t *testing.T) {
+	long := "an-extremely-long-instance-name-that-would-swallow-the-whole-row"
+	instances := []awsx.Instance{
+		{InstanceID: "i-0aaa", Name: long, State: "running", PrivateIP: "10.0.0.1"},
+	}
+	m := sized(t, instances, 40, 20)
+
+	content := m.View().Content
+	for _, line := range strings.Split(content, "\n") {
+		if lipgloss.Width(line) > 40 {
+			t.Errorf("line is %d wide, over the 40 column terminal: %q", lipgloss.Width(line), line)
+		}
+	}
+	if !strings.Contains(content, "…") {
+		t.Error("a name that long must be visibly truncated")
+	}
+}
+
+func TestRealisticTerminalWidthsRenderInsideTheirWidth(t *testing.T) {
+	for _, width := range []int{40, 60, 80, 120} {
+		m := sized(t, testInstances(), width, 20)
+		content := m.View().Content
+		if content == "" {
+			t.Fatalf("width %d rendered nothing", width)
+		}
+		for _, line := range strings.Split(content, "\n") {
+			if lipgloss.Width(line) > width {
+				t.Errorf("width %d: line is %d wide: %q", width, lipgloss.Width(line), line)
+			}
+		}
+	}
+}
+
+func FuzzTruncateRespectsItsWidthBudget(f *testing.F) {
+	f.Add("abcdef", 3)
+	f.Add("日本語テスト", 5)
+	f.Add("", 0)
+	f.Add("ünïcodé", 4)
+	f.Add("a", 1)
+	f.Add("🎉🎉🎉", 4)
+
+	f.Fuzz(func(t *testing.T, s string, n int) {
+		if n < -64 || n > 4096 || len(s) > 4096 {
+			t.Skip()
+		}
+		got := truncate(s, n)
+
+		if w := lipgloss.Width(got); w > n && n >= 0 {
+			t.Errorf("truncate(%q, %d) = %q has width %d, over budget", s, n, got, w)
+		}
+		if strings.ContainsRune(got, 0) && !strings.ContainsRune(s, 0) {
+			t.Errorf("truncate(%q, %d) = %q invented a NUL byte", s, n, got)
+		}
+		if utf8.ValidString(s) && !utf8.ValidString(got) {
+			t.Errorf("truncate(%q, %d) = %q is not valid UTF-8", s, n, got)
+		}
+		if len(got) > len(s)+len("…") {
+			t.Errorf("truncate(%q, %d) = %q is longer than the input plus an ellipsis", s, n, got)
+		}
+	})
+}
+
+func FuzzPadReachesButNeverOvershootsTheWidth(f *testing.F) {
+	f.Add("abc", 6)
+	f.Add("", 4)
+	f.Add("日本", 6)
+	f.Add("toolong", 2)
+
+	f.Fuzz(func(t *testing.T, s string, w int) {
+		if w < 0 || w > 4096 || len(s) > 4096 {
+			t.Skip()
+		}
+		got := pad(s, w)
+		if !strings.HasPrefix(got, s) {
+			t.Errorf("pad(%q, %d) = %q must only append", s, w, got)
+		}
+		width := lipgloss.Width(got)
+		if lipgloss.Width(s) >= w {
+			if got != s {
+				t.Errorf("pad(%q, %d) = %q must be a no-op when already wide enough", s, w, got)
+			}
+			return
+		}
+		if width != w {
+			t.Errorf("pad(%q, %d) = %q has width %d, want exactly %d", s, w, got, width, w)
+		}
+	})
+}
+
+func FuzzTruncateThenPadIsExactlyTheWidth(f *testing.F) {
+	f.Add("some-instance-name", 8)
+	f.Add("日本語テスト環境", 6)
+	f.Add("", 3)
+
+	f.Fuzz(func(t *testing.T, s string, w int) {
+		if w < 1 || w > 512 || len(s) > 2048 {
+			t.Skip()
+		}
+		got := pad(truncate(s, w), w)
+		if width := lipgloss.Width(got); width != w {
+			t.Errorf("pad(truncate(%q, %d), %d) = %q has width %d, want exactly %d",
+				s, w, w, got, width, w)
+		}
+	})
 }

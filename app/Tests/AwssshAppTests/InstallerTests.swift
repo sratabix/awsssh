@@ -106,6 +106,148 @@ final class InstallerTests: XCTestCase {
 }
 
 extension InstallerTests {
+    func testSwapScriptNeutralisesShellMetacharactersInPaths() {
+        let nasty = "/tmp/$(touch /tmp/pwned)/Awsssh.app"
+        let script = Installer.makeSwapScript(
+            pid: 1, newApp: nasty, currentApp: "/Applications/Awsssh.app", work: "/tmp/w")
+        XCTAssertTrue(
+            script.contains("NEW='/tmp/$(touch /tmp/pwned)/Awsssh.app'"),
+            "command substitution must sit inside single quotes where the shell will not run it")
+        XCTAssertFalse(script.contains("NEW=/tmp/$("), "the path must never be unquoted")
+    }
+
+    func testSwapScriptNeutralisesBackticksAndSemicolons() {
+        for nasty in ["/tmp/`id`/A.app", "/tmp/a;rm -rf ~/b/A.app", "/tmp/a&&whoami/A.app", "/tmp/a|tee/A.app"] {
+            let script = Installer.makeSwapScript(
+                pid: 1, newApp: nasty, currentApp: "/Applications/Awsssh.app", work: "/tmp/w")
+            XCTAssertTrue(script.contains("NEW='\(nasty)'"), "\(nasty) must be single quoted verbatim")
+        }
+    }
+
+    func testSwapScriptIsValidBashForAwkwardPaths() throws {
+        let paths = [
+            "/Applications/Awsssh.app",
+            "/tmp/it's/Awsssh.app",
+            "/tmp/a b/Awsssh.app",
+            "/tmp/$(touch pwned)/Awsssh.app",
+            "/tmp/`id`/Awsssh.app",
+            "/tmp/a;rm -rf x/Awsssh.app",
+            "/tmp/quote\"double/Awsssh.app",
+        ]
+        for path in paths {
+            let script = Installer.makeSwapScript(
+                pid: 1, newApp: path, currentApp: path, work: "/tmp/work")
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("swap-\(UUID().uuidString).sh")
+            try script.write(to: url, atomically: true, encoding: .utf8)
+            defer { try? FileManager.default.removeItem(at: url) }
+
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/bin/bash")
+            task.arguments = ["-n", url.path]
+            task.standardError = FileHandle.nullDevice
+            try task.run()
+            task.waitUntilExit()
+            XCTAssertEqual(
+                task.terminationStatus, 0,
+                "bash -n rejected the script generated for \(path.debugDescription)")
+        }
+    }
+
+    func testSwapScriptRefusesToWidenCleanupToTheTempRoot() {
+        let script = Installer.makeSwapScript(
+            pid: 1,
+            newApp: "/var/folders/xy/awsssh-update-1/extracted/Awsssh.app",
+            currentApp: "/Applications/Awsssh.app",
+            work: "/var/folders/xy/awsssh-update-1")
+        XCTAssertTrue(script.contains("rm -rf '/var/folders/xy/awsssh-update-1'"))
+        XCTAssertFalse(script.contains("rm -rf '/var/folders/xy'"))
+        XCTAssertFalse(script.contains("rm -rf '/var/folders'"))
+        XCTAssertFalse(script.contains("$TMPDIR"))
+    }
+
+    func testSwapScriptFailsFastAndNeverTouchesTheAppBeforeWaiting() {
+        let script = Installer.makeSwapScript(
+            pid: 4242, newApp: "/tmp/n/A.app", currentApp: "/Applications/A.app", work: "/tmp/n")
+        XCTAssertTrue(script.hasPrefix("#!/bin/bash\nset -e"), "the script must be strict from line one")
+
+        let waitAt = try? XCTUnwrap(script.range(of: "kill -0 4242")?.lowerBound)
+        let moveAt = try? XCTUnwrap(script.range(of: "mv \"$OLD\"")?.lowerBound)
+        if let waitAt, let moveAt {
+            XCTAssertLessThan(waitAt, moveAt, "the bundle must not be moved before our pid is gone")
+        }
+    }
+
+    func testTrustedDownloadRejectsCredentialsAndOddAuthorities() {
+        let rejected = [
+            "https://user:pass@evil.example/a.zip",
+            "https://github.com@evil.example/a.zip",
+            "https://",
+            "https://127.0.0.1/a.zip",
+            "https://localhost/a.zip",
+            "ftp://github.com/a.zip",
+            "javascript:alert(1)",
+        ]
+        for raw in rejected {
+            guard let url = URL(string: raw) else { continue }
+            XCTAssertFalse(Installer.isTrustedDownload(url), "\(raw) must not be trusted")
+        }
+    }
+
+    func testTrustedDownloadIgnoresHostCase() {
+        let url = URL(string: "https://GitHub.COM/sratabix/awsssh/releases/download/v1/A.zip")!
+        XCTAssertTrue(Installer.isTrustedDownload(url), "host comparison must be case insensitive")
+    }
+
+    func testUnsafeEntryAcceptsALeadingDotSlash() {
+        XCTAssertNil(Installer.unsafeEntry(in: ["./Awsssh.app/Contents/Info.plist"]))
+    }
+
+    func testUnsafeEntryFindsTheFirstOffenderNotTheLast() {
+        let entries = ["Awsssh.app/ok", "../first", "/second"]
+        XCTAssertEqual(Installer.unsafeEntry(in: entries), "../first")
+    }
+
+    func testUnsafeEntryOnAnEmptyListing() {
+        XCTAssertNil(Installer.unsafeEntry(in: []))
+        XCTAssertNil(Installer.unsafeEntry(in: [""]))
+    }
+
+    func testSHA256OfAnEmptyFileIsTheKnownEmptyDigest() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("installer-empty-\(UUID().uuidString)")
+        try Data().write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        XCTAssertEqual(
+            try Installer.sha256(of: url),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+    }
+
+    func testSHA256IsStableAcrossChunkBoundaries() throws {
+        for size in [(1 << 20) - 1, 1 << 20, (1 << 20) + 1] {
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("installer-chunk-\(size)-\(UUID().uuidString)")
+            try Data(repeating: 0x5A, count: size).write(to: url)
+            defer { try? FileManager.default.removeItem(at: url) }
+            let digest = try Installer.sha256(of: url)
+            XCTAssertEqual(digest.count, 64, "size \(size)")
+            XCTAssertEqual(digest, digest.lowercased(), "the API digest is lowercase hex")
+        }
+    }
+
+    func testSHA256OfAMissingFileThrows() {
+        let missing = FileManager.default.temporaryDirectory
+            .appendingPathComponent("definitely-not-here-\(UUID().uuidString)")
+        XCTAssertThrowsError(try Installer.sha256(of: missing)) { _ in }
+    }
+
+    func testBundleIdentifierIsTheOneTheCaskInstalls() {
+        XCTAssertEqual(Installer.bundleID, "com.github.sratabix.awsssh")
+        XCTAssertEqual(Installer.bundleName, "Awsssh.app")
+    }
+}
+
+extension InstallerTests {
     @MainActor func testInstallRefusesAReleaseWithNoVerifiableAsset() {
         let installer = Installer()
         let release = Release(version: "9.9.9", page: nil, asset: nil)

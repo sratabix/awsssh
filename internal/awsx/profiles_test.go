@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -233,4 +234,253 @@ func TestConfigProfileName(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestEnvOrPrefersTheEnvironmentButIgnoresAnEmptyValue(t *testing.T) {
+	t.Setenv("AWSSSH_ENVOR_PROBE", "from-env")
+	if got := envOr("AWSSSH_ENVOR_PROBE", "fallback"); got != "from-env" {
+		t.Errorf("got %q, want the environment value", got)
+	}
+
+	t.Setenv("AWSSSH_ENVOR_PROBE", "")
+	if got := envOr("AWSSSH_ENVOR_PROBE", "fallback"); got != "fallback" {
+		t.Errorf("got %q; an empty variable must not shadow the default path", got)
+	}
+
+	if got := envOr("AWSSSH_ENVOR_DEFINITELY_UNSET", "fallback"); got != "fallback" {
+		t.Errorf("got %q, want the fallback", got)
+	}
+}
+
+func TestConfigProfileNameRejectsMalformedSections(t *testing.T) {
+	cases := []string{
+		"profile",
+		"profile ",
+		"profile\t",
+		"sso-session company",
+		"services",
+		"",
+		"Profile upper",
+	}
+	for _, section := range cases {
+		if name, ok := configProfileName(section); ok {
+			t.Errorf("configProfileName(%q) = (%q, true), want it rejected", section, name)
+		}
+	}
+}
+
+func TestConfigProfileNameTrimsInnerWhitespace(t *testing.T) {
+	name, ok := configProfileName("profile   spaced   ")
+	if !ok || name != "spaced" {
+		t.Errorf("got (%q, %v), want (\"spaced\", true)", name, ok)
+	}
+}
+
+func TestParseSectionsIgnoresKeysBeforeAnySection(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config")
+	writeFile(t, path, "orphan = value\n[profile real]\nregion = eu-west-1\n")
+
+	sections := parseSections(path)
+	if len(sections) != 1 {
+		t.Fatalf("got %d sections, want 1", len(sections))
+	}
+	if sections[0].keys["region"] != "eu-west-1" {
+		t.Errorf("keys = %v, want the region", sections[0].keys)
+	}
+	if _, present := sections[0].keys["orphan"]; present {
+		t.Error("a key before any header must be dropped, not attached to the first section")
+	}
+}
+
+func TestParseSectionsKeepsValuesContainingEquals(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config")
+	writeFile(t, path, "[profile p]\nsso_start_url = https://x.example/start?a=1&b=2\n")
+
+	sections := parseSections(path)
+	if len(sections) != 1 {
+		t.Fatalf("got %d sections", len(sections))
+	}
+	want := "https://x.example/start?a=1&b=2"
+	if got := sections[0].keys["sso_start_url"]; got != want {
+		t.Errorf("got %q, want %q — only the first = separates key from value", got, want)
+	}
+}
+
+func TestParseSectionsSkipsLinesWithNoSeparator(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config")
+	writeFile(t, path, "[profile p]\ngarbage line\nregion = eu-west-1\n")
+
+	sections := parseSections(path)
+	if len(sections[0].keys) != 1 {
+		t.Errorf("keys = %v, want only the region", sections[0].keys)
+	}
+}
+
+func TestParseSectionsAcceptsBothCommentMarkers(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config")
+	writeFile(t, path, "[profile p]\n# hash comment\n; semicolon comment\nregion = eu-west-1\n")
+
+	sections := parseSections(path)
+	if len(sections[0].keys) != 1 {
+		t.Errorf("keys = %v, want comments dropped", sections[0].keys)
+	}
+}
+
+func TestParseSectionsKeepsBothOfADuplicatedHeader(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config")
+	writeFile(t, path, "[profile dup]\nregion = a\n[profile dup]\nregion = b\n")
+
+	sections := parseSections(path)
+	if len(sections) != 2 {
+		t.Fatalf("got %d sections, want both so the caller decides precedence", len(sections))
+	}
+	if sections[0].keys["region"] != "a" || sections[1].keys["region"] != "b" {
+		t.Errorf("sections = %v, want them kept in file order", sections)
+	}
+}
+
+func TestParseSectionsOnAMissingFileIsEmptyNotAnError(t *testing.T) {
+	if got := parseSections(filepath.Join(t.TempDir(), "nope")); got != nil {
+		t.Errorf("got %v, want nil for an unreadable path", got)
+	}
+}
+
+func TestParseSectionsTolerantOfWhitespaceAroundHeaders(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config")
+	writeFile(t, path, "   [ profile spaced ]   \n  region  =  eu-west-1  \n")
+
+	sections := parseSections(path)
+	if len(sections) != 1 {
+		t.Fatalf("got %d sections", len(sections))
+	}
+	if sections[0].name != "profile spaced" {
+		t.Errorf("name = %q, want the brackets and outer spaces stripped", sections[0].name)
+	}
+	if sections[0].keys["region"] != "eu-west-1" {
+		t.Errorf("keys = %v, want key and value trimmed", sections[0].keys)
+	}
+}
+
+func TestParseSectionsOnAnEmptyFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config")
+	writeFile(t, path, "")
+	if got := parseSections(path); len(got) != 0 {
+		t.Errorf("got %v, want nothing", got)
+	}
+}
+
+func FuzzParseSectionsNeverPanicsAndStaysWellFormed(f *testing.F) {
+	f.Add("[profile a]\nregion = eu-west-1\n")
+	f.Add("")
+	f.Add("[]\n")
+	f.Add("[unclosed\n")
+	f.Add("key = value\n")
+	f.Add("[a]\n[b]\n[a]\n")
+	f.Add("[profile x]\r\nregion = y\r\n")
+	f.Add("# only a comment\n")
+
+	f.Fuzz(func(t *testing.T, body string) {
+		if len(body) > 1<<16 {
+			t.Skip()
+		}
+		path := filepath.Join(t.TempDir(), "config")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		for _, section := range parseSections(path) {
+			if section.keys == nil {
+				t.Errorf("section %q has a nil key map; callers index it directly", section.name)
+			}
+			if strings.HasPrefix(section.name, "[") || strings.HasSuffix(section.name, "]") {
+				t.Errorf("section name %q kept its brackets", section.name)
+			}
+			if section.name != strings.TrimSpace(section.name) {
+				t.Errorf("section name %q was not trimmed", section.name)
+			}
+			for key, value := range section.keys {
+				if key != strings.TrimSpace(key) {
+					t.Errorf("key %q was not trimmed", key)
+				}
+				if value != strings.TrimSpace(value) {
+					t.Errorf("value %q was not trimmed", value)
+				}
+				if strings.ContainsAny(key, "\n\r") || strings.ContainsAny(value, "\n\r") {
+					t.Errorf("key/value spans lines: %q = %q", key, value)
+				}
+			}
+		}
+	})
+}
+
+func FuzzConfigProfileNameNeverReturnsAnEmptyAcceptedName(f *testing.F) {
+	f.Add("profile dev")
+	f.Add("default")
+	f.Add("profile ")
+	f.Add("")
+	f.Add("sso-session x")
+
+	f.Fuzz(func(t *testing.T, section string) {
+		if len(section) > 4096 {
+			t.Skip()
+		}
+		name, ok := configProfileName(section)
+		if !ok {
+			if name != "" {
+				t.Errorf("configProfileName(%q) rejected but still returned %q", section, name)
+			}
+			return
+		}
+		if name == "" {
+			t.Errorf("configProfileName(%q) accepted an empty profile name", section)
+		}
+		if name != strings.TrimSpace(name) {
+			t.Errorf("configProfileName(%q) = %q was not trimmed", section, name)
+		}
+	})
+}
+
+func FuzzProfilesAreAlwaysSortedAndUnique(f *testing.F) {
+	f.Add("[profile b]\n[profile a]\n", "[c]\n")
+	f.Add("", "")
+	f.Add("[default]\n", "[default]\n")
+
+	f.Fuzz(func(t *testing.T, config, credentials string) {
+		if len(config) > 1<<15 || len(credentials) > 1<<15 {
+			t.Skip()
+		}
+		dir := t.TempDir()
+		configPath := filepath.Join(dir, "config")
+		credsPath := filepath.Join(dir, "credentials")
+		if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(credsPath, []byte(credentials), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("AWS_CONFIG_FILE", configPath)
+		t.Setenv("AWS_SHARED_CREDENTIALS_FILE", credsPath)
+
+		got := Profiles()
+		if !slices.IsSorted(got) {
+			t.Errorf("Profiles() = %v is not sorted", got)
+		}
+		for i := 1; i < len(got); i++ {
+			if got[i] == got[i-1] {
+				t.Errorf("Profiles() = %v repeats %q", got, got[i])
+			}
+		}
+		for _, name := range got {
+			if name == "" {
+				t.Error("Profiles() returned an empty name")
+			}
+		}
+	})
 }

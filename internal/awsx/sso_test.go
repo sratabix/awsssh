@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -349,4 +350,355 @@ func TestLastMeaningfulLinePicksTheEnd(t *testing.T) {
 			t.Errorf("lastMeaningfulLine(%q) = %q, want %q", in, got, want)
 		}
 	}
+}
+
+func TestLabelPrefersTheSessionThenAProfileThenTheURL(t *testing.T) {
+	withSession := Login{Session: "company", Profiles: []string{"dev"}, StartURL: "https://x/start"}
+	if got := withSession.Label(); got != "company" {
+		t.Errorf("got %q, want the session name", got)
+	}
+
+	legacy := Login{Profiles: []string{"dev", "prod"}, StartURL: "https://x/start"}
+	if got := legacy.Label(); got != "dev" {
+		t.Errorf("got %q, want the first profile for a session-less login", got)
+	}
+
+	bare := Login{StartURL: "https://x/start"}
+	if got := bare.Label(); got != "https://x/start" {
+		t.Errorf("got %q, want the start URL as the last resort", got)
+	}
+
+	if got := (Login{}).Label(); got != "" {
+		t.Errorf("got %q, want empty for a zero Login", got)
+	}
+}
+
+func TestSignedInMatrix(t *testing.T) {
+	now := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name  string
+		login Login
+		want  bool
+	}{
+		{"no expiry, not refreshable", Login{}, false},
+		{"future expiry", Login{Expires: now.Add(time.Hour)}, true},
+		{"past expiry", Login{Expires: now.Add(-time.Hour)}, false},
+		{"exactly now is not after now", Login{Expires: now}, false},
+		{"refreshable with no expiry", Login{Refreshable: true}, true},
+		{"refreshable beats a lapsed access token", Login{Expires: now.Add(-time.Hour), Refreshable: true}, true},
+	}
+	for _, c := range cases {
+		if got := c.login.SignedIn(now); got != c.want {
+			t.Errorf("%s: SignedIn = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestArgsNeverProducesAnEmptyTarget(t *testing.T) {
+	for _, l := range []Login{
+		{Profiles: []string{"dev"}},
+		{Session: "company"},
+		{Session: "company", Profiles: []string{"dev"}},
+	} {
+		args := l.Args()
+		if len(args) < 2 || args[len(args)-1] == "" {
+			t.Errorf("Args() = %v, want a non-empty target", args)
+		}
+		if args[0] != "sso" || args[1] != "login" {
+			t.Errorf("Args() = %v, want it to start with sso login", args)
+		}
+	}
+}
+
+func TestCachedTokensSkipsUnparseableFiles(t *testing.T) {
+	now := time.Now().UTC()
+	ssoCache(t, map[string]string{
+		"broken.json": "{not json at all",
+		"empty.json":  "",
+		"good.json":   token("https://good.example/start", now.Add(time.Hour).Format(time.RFC3339)),
+	})
+
+	tokens := cachedTokens(now)
+	if len(tokens) != 1 {
+		t.Fatalf("got %d tokens, want only the readable one: %v", len(tokens), tokens)
+	}
+	if _, ok := tokens["https://good.example/start"]; !ok {
+		t.Errorf("tokens = %v, want the good start URL", tokens)
+	}
+}
+
+func TestCachedTokensIgnoresNonJSONFilesAndDirectories(t *testing.T) {
+	now := time.Now().UTC()
+	ssoCache(t, map[string]string{
+		"notes.txt":  token("https://ignored.example/start", now.Add(time.Hour).Format(time.RFC3339)),
+		"token.JSON": token("https://also-ignored.example/start", now.Add(time.Hour).Format(time.RFC3339)),
+		"real.json":  token("https://real.example/start", now.Add(time.Hour).Format(time.RFC3339)),
+	})
+	sub := filepath.Join(os.Getenv("HOME"), ".aws", "sso", "cache", "nested.json")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	tokens := cachedTokens(now)
+	if len(tokens) != 1 {
+		t.Fatalf("got %d tokens, want only real.json: %v", len(tokens), tokens)
+	}
+}
+
+func TestCachedTokensWithNoCacheDirectoryIsEmpty(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if got := cachedTokens(time.Now()); len(got) != 0 {
+		t.Errorf("got %v, want nothing when the cache does not exist", got)
+	}
+}
+
+func TestCachedTokensSkipsAnEntryMissingTheAccessToken(t *testing.T) {
+	now := time.Now().UTC()
+	expires := now.Add(time.Hour).Format(time.RFC3339)
+	ssoCache(t, map[string]string{
+		"reg.json":   `{"startUrl":"https://x.example/start","expiresAt":"` + expires + `"}`,
+		"tok.json":   token("https://y.example/start", expires),
+		"nourl.json": `{"accessToken":"secret","expiresAt":"` + expires + `"}`,
+	})
+
+	tokens := cachedTokens(now)
+	if len(tokens) != 1 {
+		t.Fatalf("got %d tokens, want only the complete one: %v", len(tokens), tokens)
+	}
+	if _, ok := tokens["https://y.example/start"]; !ok {
+		t.Errorf("tokens = %v, want the entry that had both fields", tokens)
+	}
+}
+
+func TestParseExpiryRejectsGarbage(t *testing.T) {
+	for _, value := range []string{"", "not a date", "2026-13-45T99:99:99Z", "1700000000"} {
+		if got := parseExpiry(value); !got.IsZero() {
+			t.Errorf("parseExpiry(%q) = %v, want the zero time", value, got)
+		}
+	}
+}
+
+func TestParseExpiryNormalisesToUTC(t *testing.T) {
+	got := parseExpiry("2026-07-31T14:00:00+02:00")
+	if got.Location() != time.UTC {
+		t.Errorf("location = %v, want UTC so comparisons are consistent", got.Location())
+	}
+	if got.Hour() != 12 {
+		t.Errorf("hour = %d, want 12 after the offset is applied", got.Hour())
+	}
+}
+
+func TestLoginsDropsASessionWithNoProfiles(t *testing.T) {
+	awsFiles(t, "[sso-session lonely]\nsso_start_url = https://lonely.example/start\nsso_region = eu-west-1\n", "")
+	for _, l := range Logins() {
+		if l.Session == "lonely" {
+			t.Error("a login that reaches no profile is noise and must be dropped")
+		}
+	}
+}
+
+func TestLoginsSortProfilesSoTheChosenLoginIsDeterministic(t *testing.T) {
+	awsFiles(t, `
+[sso-session company]
+sso_start_url = https://example.awsapps.com/start
+sso_region = eu-central-1
+
+[profile zeta]
+sso_session = company
+
+[profile alpha]
+sso_session = company
+`, "")
+	logins := Logins()
+	if len(logins) != 1 {
+		t.Fatalf("got %d logins, want 1", len(logins))
+	}
+	if !slices.IsSorted(logins[0].Profiles) {
+		t.Errorf("profiles = %v, want them sorted so Args() cannot depend on file order", logins[0].Profiles)
+	}
+	if logins[0].Args()[3] != "alpha" {
+		t.Errorf("Args() = %v, want the first sorted profile", logins[0].Args())
+	}
+}
+
+func TestLoginsAreSortedByLabel(t *testing.T) {
+	awsFiles(t, `
+[sso-session zebra]
+sso_start_url = https://z.example/start
+
+[profile z1]
+sso_session = zebra
+
+[sso-session apple]
+sso_start_url = https://a.example/start
+
+[profile a1]
+sso_session = apple
+`, "")
+	logins := Logins()
+	if len(logins) != 2 {
+		t.Fatalf("got %d logins, want 2", len(logins))
+	}
+	labels := []string{logins[0].Label(), logins[1].Label()}
+	if !slices.IsSorted(labels) {
+		t.Errorf("labels = %v, want them sorted", labels)
+	}
+}
+
+func TestLoginsIgnoresADuplicateSessionBlock(t *testing.T) {
+	awsFiles(t, `
+[sso-session company]
+sso_start_url = https://first.example/start
+
+[sso-session company]
+sso_start_url = https://second.example/start
+
+[profile p]
+sso_session = company
+`, "")
+	logins := Logins()
+	if len(logins) != 1 {
+		t.Fatalf("got %d logins, want 1", len(logins))
+	}
+	if logins[0].StartURL != "https://first.example/start" {
+		t.Errorf("StartURL = %q, want the first block to win", logins[0].StartURL)
+	}
+}
+
+func TestLoginsIgnoresAProfilePointingAtAnUnknownSession(t *testing.T) {
+	awsFiles(t, "[profile orphan]\nsso_session = nonexistent\n", "")
+	if got := Logins(); len(got) != 0 {
+		t.Errorf("got %v, want nothing for a profile whose session is not defined", got)
+	}
+}
+
+func TestCachedTokensSkipsAFileItCannotRead(t *testing.T) {
+	now := time.Now().UTC()
+	expires := now.Add(time.Hour).Format(time.RFC3339)
+	ssoCache(t, map[string]string{
+		"locked.json":   token("https://locked.example/start", expires),
+		"readable.json": token("https://readable.example/start", expires),
+	})
+
+	locked := filepath.Join(os.Getenv("HOME"), ".aws", "sso", "cache", "locked.json")
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o600) })
+
+	if os.Geteuid() == 0 {
+		t.Skip("root can read a 0000 file, so there is nothing to skip over")
+	}
+
+	tokens := cachedTokens(now)
+	if _, ok := tokens["https://readable.example/start"]; !ok {
+		t.Errorf("tokens = %v; one unreadable file must not lose the others", tokens)
+	}
+	if _, ok := tokens["https://locked.example/start"]; ok {
+		t.Error("an unreadable file must be skipped, not guessed at")
+	}
+}
+
+func TestCheckLoginWalksSeveralProfilesAndStaysUnknownWhenNoneAnswer(t *testing.T) {
+	awsFiles(t, "", "")
+
+	login := Login{
+		Session:  "company",
+		StartURL: "https://example.awsapps.com/start",
+		Region:   "eu-central-1",
+		Profiles: []string{"ghost-1", "ghost-2", "ghost-3", "ghost-4", "ghost-5"},
+	}
+
+	done := make(chan LoginState, 1)
+	go func() { done <- CheckLogin(t.Context(), login) }()
+
+	select {
+	case got := <-done:
+		if got != LoginUnknown {
+			t.Errorf("state = %q; profiles that cannot even be resolved prove nothing", got)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("CheckLogin must stop at checkProfileLimit rather than walking every profile")
+	}
+}
+
+func TestCheckLoginOnALoginWithOneBogusProfileIsUnknown(t *testing.T) {
+	awsFiles(t, "", "")
+	login := Login{Session: "company", Profiles: []string{"ghost"}, Region: "eu-central-1"}
+	if got := CheckLogin(t.Context(), login); got != LoginUnknown {
+		t.Errorf("state = %q, want unknown", got)
+	}
+}
+
+func FuzzParseExpiryNeverPanicsAndIsAlwaysUTC(f *testing.F) {
+	f.Add("2026-07-31T12:00:00Z")
+	f.Add("2026-07-31T12:00:00UTC")
+	f.Add("")
+	f.Add("garbage")
+	f.Add("2026-07-31T14:00:00+02:00")
+
+	f.Fuzz(func(t *testing.T, value string) {
+		if len(value) > 4096 {
+			t.Skip()
+		}
+		got := parseExpiry(value)
+		if got.IsZero() {
+			return
+		}
+		if got.Location() != time.UTC {
+			t.Errorf("parseExpiry(%q) = %v is not UTC; comparisons rely on it", value, got)
+		}
+	})
+}
+
+func FuzzLoginLabelAndArgsAreAlwaysUsable(f *testing.F) {
+	f.Add("company", "https://x.example/start", "dev")
+	f.Add("", "https://x.example/start", "dev")
+	f.Add("", "", "")
+	f.Add("company", "", "")
+
+	f.Fuzz(func(t *testing.T, session, url, profile string) {
+		if len(session) > 512 || len(url) > 512 || len(profile) > 512 {
+			t.Skip()
+		}
+		login := Login{Session: session, StartURL: url}
+		if profile != "" {
+			login.Profiles = []string{profile}
+		}
+
+		args := login.Args()
+		if len(args) != 4 {
+			t.Fatalf("Args() = %v, want four elements", args)
+		}
+		if args[0] != "sso" || args[1] != "login" {
+			t.Errorf("Args() = %v must start with sso login", args)
+		}
+		if args[2] != "--profile" && args[2] != "--sso-session" {
+			t.Errorf("Args() = %v used an unexpected flag", args)
+		}
+		if args[2] == "--profile" && args[3] != profile {
+			t.Errorf("Args() = %v did not pass the profile through", args)
+		}
+	})
+}
+
+func FuzzSignedInAgreesWithItsInputs(f *testing.F) {
+	f.Add(int64(0), false)
+	f.Add(int64(3600), false)
+	f.Add(int64(-3600), true)
+
+	f.Fuzz(func(t *testing.T, offset int64, refreshable bool) {
+		if offset < -1<<40 || offset > 1<<40 {
+			t.Skip()
+		}
+		now := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
+		login := Login{Expires: now.Add(time.Duration(offset) * time.Second), Refreshable: refreshable}
+
+		got := login.SignedIn(now)
+		want := refreshable || offset > 0
+		if got != want {
+			t.Errorf("SignedIn with offset %ds refreshable=%v = %v, want %v",
+				offset, refreshable, got, want)
+		}
+	})
 }

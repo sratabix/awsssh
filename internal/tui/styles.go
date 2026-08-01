@@ -30,9 +30,20 @@ func truncate(s string, n int) string {
 	if lipgloss.Width(s) <= n {
 		return s
 	}
-	if n <= 1 {
-		return string([]rune(s)[:n])
+	if n <= 0 {
+		return ""
 	}
-	r := []rune(s)
-	return string(r[:n-1]) + "…"
+
+	budget := n - 1
+	var b strings.Builder
+	width := 0
+	for _, r := range s {
+		w := lipgloss.Width(string(r))
+		if width+w > budget {
+			break
+		}
+		b.WriteRune(r)
+		width += w
+	}
+	return b.String() + "…"
 }
