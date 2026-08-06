@@ -22,6 +22,8 @@ final class NetworkMonitor {
     private var pending: Task<Void, Never>?
     private var running = false
 
+    var reachable: Bool { snapshot?.satisfied ?? true }
+
     init(settle: Duration = .seconds(3)) {
         self.settle = settle
     }

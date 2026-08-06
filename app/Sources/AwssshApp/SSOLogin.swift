@@ -13,14 +13,22 @@ struct SSOLogin: Identifiable, Equatable {
     var profiles: [String]
     var expires: Date?
     var refreshable: Bool
+    var scoped: Bool
 
     var id: String { label }
 
-    init(label: String, profiles: [String] = [], expires: Date? = nil, refreshable: Bool = false) {
+    init(
+        label: String,
+        profiles: [String] = [],
+        expires: Date? = nil,
+        refreshable: Bool = false,
+        scoped: Bool = false
+    ) {
         self.label = label
         self.profiles = profiles
         self.expires = expires
         self.refreshable = refreshable
+        self.scoped = scoped
     }
 
     init(_ wire: HelperLogin) {
@@ -28,6 +36,7 @@ struct SSOLogin: Identifiable, Equatable {
         profiles = wire.profiles ?? []
         expires = wire.expires.flatMap(SSOLogin.parse)
         refreshable = wire.refreshable ?? false
+        scoped = wire.scoped ?? false
     }
 
     static func parse(_ value: String) -> Date? {
@@ -38,6 +47,7 @@ struct SSOLogin: Identifiable, Equatable {
     }
 
     func signedIn(at now: Date, check: LoginCheck = .unknown) -> Bool {
+        guard expires != nil || refreshable else { return false }
         switch check {
         case .valid: return true
         case .expired: return false

@@ -5,16 +5,21 @@ import XCTest
 
 final class AppModelTests: XCTestCase {
     private var tempDirectory: URL!
+    private var suite: String!
 
     override func setUp() {
         super.setUp()
         tempDirectory = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("awsssh-model-\(UUID().uuidString)")
         Store.directoryOverride = tempDirectory
+        suite = "awsssh-model-\(UUID().uuidString)"
+        Preferences.store = UserDefaults(suiteName: suite)!
     }
 
     override func tearDown() {
         Store.directoryOverride = nil
+        Preferences.store.removePersistentDomain(forName: suite)
+        Preferences.store = .standard
         try? FileManager.default.removeItem(at: tempDirectory)
         super.tearDown()
     }
@@ -530,6 +535,417 @@ final class AppModelTests: XCTestCase {
 
         XCTAssertEqual(m.signingIn, "company")
         XCTAssertNil(m.signInError, "a result for a different login is not this one's failure")
+    }
+
+    @MainActor private func autoModel(_ logins: [SSOLogin]) -> AppModel {
+        let m = model()
+        m.showSSO = true
+        m.autoSignIn = true
+        m.logins = logins
+        m.screen.lockedOverride = false
+        m.presentation.activeOverride = false
+        return m
+    }
+
+    @MainActor func testAnExpiredSessionIsSignedInAutomaticallyWhenAsked() {
+        let m = autoModel([SSOLogin(label: "company")])
+        m.handle(HelperMessage(event: "loginCheck", detail: "company", state: "expired"))
+
+        XCTAssertEqual(m.signingIn, "company", "the whole point of the setting")
+    }
+
+    @MainActor func testHidingTheSSORowTurnsAutomaticSignInOff() {
+        let m = model()
+        m.showSSO = true
+        m.autoSignIn = true
+
+        m.showSSO = false
+
+        XCTAssertFalse(
+            m.autoSignIn,
+            "the setting is nested under the SSO row; hiding the parent must not leave it armed")
+        XCTAssertFalse(Preferences.autoSignIn, "and that has to be written through")
+
+        m.showSSO = true
+        XCTAssertFalse(m.autoSignIn, "turning the parent back on must not silently re-arm it")
+    }
+
+    @MainActor func testAutoSignInIsOffByDefault() {
+        let m = model()
+        XCTAssertFalse(m.autoSignIn, "opening a browser on its own has to be opted into")
+
+        m.logins = [SSOLogin(label: "company")]
+        m.handle(HelperMessage(event: "loginCheck", detail: "company", state: "expired"))
+        XCTAssertNil(m.signingIn)
+    }
+
+    @MainActor private func path(_ satisfied: Bool) -> PathSnapshot {
+        PathSnapshot(satisfied: satisfied, interfaces: ["en0"], gateways: ["192.168.1.1"])
+    }
+
+    private let notes = """
+        ## v1.0.0
+
+        - Dismiss all errored forwards at once.
+
+        ## v0.9.0
+
+        - Older thing.
+        """
+
+    @MainActor func testAFirstRunRecordsTheVersionWithoutAnnouncingIt() {
+        let m = model()
+        m.announceUpdate(current: "1.0.0", notes: notes)
+
+        XCTAssertFalse(
+            m.showingWhatsNew,
+            "a fresh install has nothing new to be told about")
+        XCTAssertEqual(Preferences.lastSeenVersion, "1.0.0")
+    }
+
+    @MainActor func testAnUpdateAnnouncesItselfOnce() {
+        Preferences.lastSeenVersion = "0.9.0"
+        let m = model()
+
+        m.announceUpdate(current: "1.0.0", notes: notes)
+        XCTAssertTrue(m.showingWhatsNew)
+        XCTAssertEqual(m.whatsNew.map(\.version), ["1.0.0"])
+
+        m.closeWhatsNew()
+        m.announceUpdate(current: "1.0.0", notes: notes)
+        XCTAssertFalse(
+            m.showingWhatsNew,
+            "the version is recorded on the first announce, so a relaunch stays quiet")
+    }
+
+    @MainActor func testTheSameVersionNeverAnnounces() {
+        Preferences.lastSeenVersion = "1.0.0"
+        let m = model()
+        m.announceUpdate(current: "1.0.0", notes: notes)
+
+        XCTAssertFalse(m.showingWhatsNew)
+    }
+
+    @MainActor func testAnUpdateWithNoMatchingNotesStaysQuiet() {
+        Preferences.lastSeenVersion = "1.0.0"
+        let m = model()
+        m.announceUpdate(current: "1.0.1", notes: notes)
+
+        XCTAssertFalse(
+            m.showingWhatsNew,
+            "an empty window is worse than none")
+        XCTAssertEqual(
+            Preferences.lastSeenVersion, "1.0.1",
+            "the version still has to be recorded, or it retries on every launch")
+    }
+
+    @MainActor func testWhatsNewCanBeOpenedByHand() {
+        let m = model()
+        m.openWhatsNew(current: "0.9.0", notes: notes)
+
+        XCTAssertTrue(m.showingWhatsNew)
+        XCTAssertEqual(m.whatsNew.map(\.version), ["0.9.0"])
+    }
+
+    @MainActor func testAManualSignInShowsItsWindowAtOnce() {
+        let m = autoModel([SSOLogin(label: "company")])
+        m.signIn(m.logins[0])
+
+        XCTAssertTrue(
+            m.showingWebSignIn,
+            "the user clicked Sign in; something has to appear immediately")
+    }
+
+    @MainActor func testASilentSignInRevealsItsWindowOnlyWhenItStalls() {
+        let m = autoModel([SSOLogin(label: "company")])
+        m.signIn(m.logins[0], silent: true)
+
+        XCTAssertFalse(
+            m.showingWebSignIn,
+            "a renewal that completes on the stored cookie must never show a window")
+
+        m.handle(HelperMessage(event: "ssoLoginPending", detail: "company"))
+        XCTAssertTrue(m.showingWebSignIn, "past the grace period the user has to see it")
+
+        m.handle(HelperMessage(event: "ssoLogin", detail: "company"))
+        XCTAssertFalse(m.showingWebSignIn, "the result closes it")
+    }
+
+    @MainActor func testCancellingTheEmbeddedWindowClosesIt() {
+        let m = autoModel([SSOLogin(label: "company")])
+        m.signIn(m.logins[0], silent: true)
+        m.handle(HelperMessage(event: "ssoLoginPending", detail: "company"))
+        XCTAssertTrue(m.showingWebSignIn)
+
+        m.cancelWebSignIn()
+        XCTAssertFalse(m.showingWebSignIn)
+    }
+
+    @MainActor func testAPresentationIsNotSignedInAutomatically() {
+        let m = autoModel([SSOLogin(label: "company")])
+        m.presentation.activeOverride = true
+
+        m.maybeAutoSignIn()
+
+        XCTAssertNil(
+            m.signingIn,
+            "a stalled login raises the browser, which lands on whatever is being shared")
+    }
+
+    @MainActor func testAPresentationDoesNotConsumeTheBackoff() {
+        let m = autoModel([SSOLogin(label: "company")])
+        let start = Date()
+
+        m.presentation.activeOverride = true
+        m.maybeAutoSignIn(now: start)
+        XCTAssertNil(m.signingIn)
+
+        m.presentation.activeOverride = false
+        m.maybeAutoSignIn(now: start.addingTimeInterval(1))
+        XCTAssertEqual(m.signingIn, "company", "ending the call should sign in, not wait 15 minutes")
+    }
+
+    @MainActor func testEveryDeferralIsIndependent() {
+        let m = autoModel([SSOLogin(label: "company")])
+        XCTAssertFalse(m.deferAutoSignIn, "a normal desk session must not be deferred")
+
+        m.screen.lockedOverride = true
+        XCTAssertTrue(m.deferAutoSignIn)
+        m.screen.lockedOverride = false
+
+        m.presentation.activeOverride = true
+        XCTAssertTrue(m.deferAutoSignIn)
+        m.presentation.activeOverride = false
+
+        m.network.observe(path(false))
+        XCTAssertTrue(m.deferAutoSignIn)
+    }
+
+    @MainActor func testALockedScreenIsNotSignedInAutomatically() {
+        let m = autoModel([SSOLogin(label: "company")])
+        m.screen.lockedOverride = true
+
+        m.maybeAutoSignIn()
+
+        XCTAssertNil(
+            m.signingIn,
+            "nobody is there to approve it, and the tab would open behind the lock screen")
+    }
+
+    @MainActor func testALockedScreenDoesNotConsumeTheBackoff() {
+        let m = autoModel([SSOLogin(label: "company")])
+        let start = Date()
+
+        m.screen.lockedOverride = true
+        m.maybeAutoSignIn(now: start)
+        XCTAssertNil(m.signingIn)
+
+        m.screen.lockedOverride = false
+        m.maybeAutoSignIn(now: start.addingTimeInterval(1))
+        XCTAssertEqual(
+            m.signingIn, "company",
+            "unlocking has to sign in at once, not serve out a backoff it never earned")
+    }
+
+    @MainActor func testTheRealSignalsAnswerWithoutOverridesOrPermissions() {
+        let screen = ScreenLock()
+        let presentation = Presentation()
+
+        XCTAssertFalse(
+            screen.locked,
+            "the session dictionary carries no locked key while the session is in use")
+        _ = presentation.active
+        _ = Presentation.mirroring()
+        _ = Presentation.cameraInUse()
+    }
+
+    @MainActor func testAnOfflineMachineIsNotSignedInAutomatically() {
+        let m = autoModel([SSOLogin(label: "company")])
+        m.network.observe(path(false))
+
+        m.maybeAutoSignIn()
+
+        XCTAssertNil(
+            m.signingIn,
+            "a login that cannot reach the IdP would fail and burn the backoff")
+    }
+
+    @MainActor func testAnOfflineAttemptDoesNotConsumeTheBackoff() {
+        let m = autoModel([SSOLogin(label: "company")])
+        let start = Date()
+
+        m.network.observe(path(false))
+        m.maybeAutoSignIn(now: start)
+        XCTAssertNil(m.signingIn)
+
+        m.network.observe(path(true))
+        m.maybeAutoSignIn(now: start.addingTimeInterval(1))
+        XCTAssertEqual(
+            m.signingIn, "company",
+            "the offline skip must not count as an attempt, or recovery waits 15 minutes")
+    }
+
+    @MainActor func testReachabilityIsAssumedUntilTheMonitorSaysOtherwise() {
+        let m = autoModel([SSOLogin(label: "company")])
+
+        XCTAssertTrue(
+            m.network.reachable,
+            "before the first path update, blocking sign-in would break every launch")
+        m.maybeAutoSignIn()
+        XCTAssertEqual(m.signingIn, "company")
+    }
+
+    @MainActor func testAValidSessionIsLeftAlone() {
+        let live = SSOLogin(label: "company", expires: Date().addingTimeInterval(3600))
+        let m = autoModel([live])
+        m.handle(HelperMessage(event: "loginCheck", detail: "company", state: "valid"))
+
+        XCTAssertNil(m.signingIn)
+    }
+
+    @MainActor func testAVanishedTokenIsNoticedWithoutWaitingForTheNextCheck() {
+        let m = autoModel([SSOLogin(label: "company", expires: Date().addingTimeInterval(3600))])
+        m.checks["company"] = .valid
+
+        m.handle(
+            HelperMessage(
+                event: "logins", logins: [HelperLogin(label: "company", profiles: ["dev"])]))
+
+        XCTAssertEqual(
+            m.signingIn, "company",
+            "a token that is gone from the cache cannot be rescued by a five-minute-old verdict")
+    }
+
+    @MainActor func testAHiddenSSORowSuppressesTheAutomaticSignIn() {
+        let m = autoModel([SSOLogin(label: "company")])
+        m.showSSO = false
+        m.handle(HelperMessage(event: "loginCheck", detail: "company", state: "expired"))
+
+        XCTAssertNil(
+            m.signingIn,
+            "the row is the only place its progress and failures are visible")
+    }
+
+    @MainActor func testAFailedAutomaticSignInBacksOffBeforeRetrying() {
+        let m = autoModel([SSOLogin(label: "company")])
+        let start = Date()
+
+        m.maybeAutoSignIn(now: start)
+        XCTAssertEqual(m.signingIn, "company")
+        m.handle(HelperMessage(event: "ssoLogin", detail: "company", error: "no"))
+
+        m.maybeAutoSignIn(now: start.addingTimeInterval(AppModel.autoSignInBackoff - 1))
+        XCTAssertNil(m.signingIn, "a login that keeps failing must not open a tab every poll")
+
+        m.maybeAutoSignIn(now: start.addingTimeInterval(AppModel.autoSignInBackoff + 1))
+        XCTAssertEqual(m.signingIn, "company", "but it has to recover on its own eventually")
+    }
+
+    @MainActor func testASignInThatReportsSuccessButStaysExpiredDoesNotSpin() {
+        let m = autoModel([SSOLogin(label: "company")])
+        let start = Date()
+
+        m.checks["company"] = .expired
+        m.maybeAutoSignIn(now: start)
+        XCTAssertEqual(m.signingIn, "company")
+
+        m.handle(HelperMessage(event: "ssoLogin", detail: "company"), now: start)
+        m.checks["company"] = .expired
+        m.maybeAutoSignIn(now: start.addingTimeInterval(1))
+
+        XCTAssertNil(
+            m.signingIn,
+            "exit 0 on a session that still reads expired must not retry with no delay")
+    }
+
+    @MainActor func testASessionThatCameBackClearsItsBackoff() {
+        let start = Date()
+        let m = autoModel([SSOLogin(label: "company", expires: start.addingTimeInterval(3600))])
+
+        m.checks["company"] = .expired
+        m.maybeAutoSignIn(now: start)
+        m.handle(HelperMessage(event: "ssoLogin", detail: "company", error: "no"))
+
+        m.checks["company"] = .valid
+        m.maybeAutoSignIn(now: start.addingTimeInterval(1))
+
+        m.checks["company"] = .expired
+        m.maybeAutoSignIn(now: start.addingTimeInterval(2))
+        XCTAssertEqual(m.signingIn, "company", "signing in by hand should re-arm the automatic path")
+    }
+
+    @MainActor func testAnAutomaticSignInDoesNotInterruptOneInFlight() {
+        let m = autoModel([SSOLogin(label: "company"), SSOLogin(label: "other")])
+        m.signIn(m.logins[0])
+        m.checks["other"] = .expired
+        m.maybeAutoSignIn()
+
+        XCTAssertEqual(m.signingIn, "company")
+    }
+
+    @MainActor func testASlowSignInIsReportedAsWaitingOnTheUser() {
+        let m = autoModel([SSOLogin(label: "company")])
+        m.signIn(m.logins[0])
+        XCTAssertFalse(m.signInPending)
+
+        m.handle(HelperMessage(event: "ssoLoginPending", detail: "company"))
+        XCTAssertTrue(m.signInPending)
+
+        m.handle(HelperMessage(event: "ssoLogin", detail: "company"))
+        XCTAssertFalse(m.signInPending, "the result has to clear it or the row lies")
+    }
+
+    @MainActor func testAPendingNoticeForAnotherLoginIsIgnored() {
+        let m = autoModel([SSOLogin(label: "company"), SSOLogin(label: "other")])
+        m.signIn(m.logins[0])
+        m.handle(HelperMessage(event: "ssoLoginPending", detail: "other"))
+
+        XCTAssertFalse(m.signInPending)
+    }
+
+    @MainActor func testOnlySignedOutLoginsOfferASignInButton() {
+        let now = Date()
+        let m = model()
+        m.logins = [
+            SSOLogin(label: "live", expires: now.addingTimeInterval(3600)),
+            SSOLogin(label: "renewing", refreshable: true),
+            SSOLogin(label: "stale", expires: now.addingTimeInterval(-3600)),
+            SSOLogin(label: "no-token"),
+        ]
+
+        XCTAssertEqual(m.signedOutLogins(at: now).map(\.label), ["stale", "no-token"])
+
+        m.checks["stale"] = .valid
+        m.checks["live"] = .expired
+        XCTAssertEqual(
+            m.signedOutLogins(at: now).map(\.label), ["live", "no-token"],
+            "the API verdict decides, in both directions")
+    }
+
+    @MainActor func testEverythingSignedInLeavesNothingToSignIn() {
+        let now = Date()
+        let m = model()
+        m.logins = [SSOLogin(label: "a", refreshable: true), SSOLogin(label: "b", refreshable: true)]
+
+        XCTAssertTrue(m.signedOutLogins(at: now).isEmpty, "the button has to disappear")
+    }
+
+    func testTheErrorNoticeReadsCorrectlyForASingleForward() {
+        XCTAssertEqual(ContentView.erroredLabel(1), "1 forward errored")
+        XCTAssertEqual(ContentView.erroredLabel(3), "3 forwards errored")
+    }
+
+    @MainActor func testOnlyUnrenewableSessionsAreNudgedAboutTheScope() {
+        let m = model()
+        m.logins = [
+            SSOLogin(label: "plain"),
+            SSOLogin(label: "scoped", scoped: true),
+            SSOLogin(label: "already-renewing", refreshable: true),
+        ]
+
+        XCTAssertEqual(
+            m.unscopedLogins.map(\.label), ["plain"],
+            "a session that already renews needs no advice")
     }
 
     @MainActor func testALoginCheckIsRecordedAgainstItsLabel() {

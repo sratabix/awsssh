@@ -274,7 +274,7 @@ func writeFile(path, contents string) error {
 	return os.WriteFile(path, []byte(contents), 0o600)
 }
 
-func stubLogins(t *testing.T, found []awsx.Login, run func(context.Context, awsx.Login) error) {
+func stubLogins(t *testing.T, found []awsx.Login, run func(context.Context, awsx.LoginRequest) error) {
 	t.Helper()
 	previousList, previousRun := listLogins, ssoLogin
 	listLogins = func() []awsx.Login { return found }
@@ -368,8 +368,8 @@ func TestALoginWithNoCachedTokenReportsNoExpiry(t *testing.T) {
 
 func TestSSOLoginRunsTheMatchingLoginAndRefreshes(t *testing.T) {
 	var ran []string
-	stubLogins(t, sharedSession(), func(_ context.Context, login awsx.Login) error {
-		ran = append(ran, strings.Join(login.Args(), " "))
+	stubLogins(t, sharedSession(), func(_ context.Context, req awsx.LoginRequest) error {
+		ran = append(ran, strings.Join(req.Login.Args(), " "))
 		return nil
 	})
 
@@ -391,7 +391,7 @@ func TestSSOLoginRunsTheMatchingLoginAndRefreshes(t *testing.T) {
 }
 
 func TestSSOLoginReportsAFailure(t *testing.T) {
-	stubLogins(t, sharedSession(), func(context.Context, awsx.Login) error {
+	stubLogins(t, sharedSession(), func(context.Context, awsx.LoginRequest) error {
 		return errors.New("the AWS CLI is not installed")
 	})
 
@@ -409,7 +409,7 @@ func TestSSOLoginReportsAFailure(t *testing.T) {
 
 func TestSSOLoginRejectsAnUnknownLabel(t *testing.T) {
 	called := false
-	stubLogins(t, sharedSession(), func(context.Context, awsx.Login) error {
+	stubLogins(t, sharedSession(), func(context.Context, awsx.LoginRequest) error {
 		called = true
 		return nil
 	})
@@ -424,7 +424,7 @@ func TestSSOLoginRejectsAnUnknownLabel(t *testing.T) {
 }
 
 func TestServeWaitsForASignInBeforeShuttingDown(t *testing.T) {
-	stubLogins(t, sharedSession(), func(context.Context, awsx.Login) error {
+	stubLogins(t, sharedSession(), func(context.Context, awsx.LoginRequest) error {
 		time.Sleep(20 * time.Millisecond)
 		return nil
 	})
@@ -432,4 +432,84 @@ func TestServeWaitsForASignInBeforeShuttingDown(t *testing.T) {
 	if _, ok := firstWithEvent(runServe(t, `{"cmd":"ssoLogin","login":"company"}`+"\n"), "ssoLogin"); !ok {
 		t.Error("stdin EOF must not drop a sign-in that is still running")
 	}
+}
+
+func stubGrace(t *testing.T, d time.Duration) {
+	t.Helper()
+	previous := signInGrace
+	signInGrace = d
+	t.Cleanup(func() { signInGrace = previous })
+}
+
+func TestASlowSignInSaysItIsWaitingOnTheUser(t *testing.T) {
+	stubGrace(t, time.Millisecond)
+	stubLogins(t, sharedSession(), func(context.Context, awsx.LoginRequest) error {
+		time.Sleep(30 * time.Millisecond)
+		return nil
+	})
+
+	messages := runServe(t, `{"cmd":"ssoLogin","login":"company"}`+"\n")
+
+	m, ok := firstWithEvent(messages, "ssoLoginPending")
+	if !ok {
+		t.Fatal("a sign-in past its grace period must say so, or a hidden window is invisible")
+	}
+	if m.Detail != "company" {
+		t.Errorf("Detail = %q, want the login it was about", m.Detail)
+	}
+	if _, ok := firstWithEvent(messages, "ssoLogin"); !ok {
+		t.Error("the pending notice must not replace the result")
+	}
+}
+
+func TestAPromptSignInStaysQuiet(t *testing.T) {
+	stubGrace(t, time.Hour)
+	stubLogins(t, sharedSession(), func(context.Context, awsx.LoginRequest) error { return nil })
+
+	if _, ok := firstWithEvent(runServe(t, `{"cmd":"ssoLogin","login":"company"}`+"\n"), "ssoLoginPending"); ok {
+		t.Error("a sign-in that completes inside the grace period must not report pending")
+	}
+}
+
+func TestLoginsReportAnUnscopedSession(t *testing.T) {
+	logins := sharedSession()
+	logins[0].Scoped = true
+	stubLogins(t, logins, nil)
+
+	m, ok := firstWithEvent(runServe(t, `{"cmd":"logins"}`+"\n"), "logins")
+	if !ok {
+		t.Fatal("no logins message")
+	}
+	if !m.Logins[0].Scoped {
+		t.Error("Scoped must reach the app, it is what decides the config nudge")
+	}
+}
+
+func TestTheAuthorizeURLIsForwardedToTheApp(t *testing.T) {
+	const want = "https://oidc.eu-central-1.amazonaws.com/authorize?x=1"
+	stubLogins(t, sharedSession(), func(_ context.Context, req awsx.LoginRequest) error {
+		req.OnURL(want)
+		return nil
+	})
+
+	m, ok := firstWithEvent(runServe(t, `{"cmd":"ssoLogin","login":"company"}`+"\n"), "authorizeURL")
+	if !ok {
+		t.Fatal("no authorizeURL message; the web view would have nothing to load")
+	}
+	if m.URL != want {
+		t.Errorf("URL = %q, want %q", m.URL, want)
+	}
+	if m.Detail != "company" {
+		t.Errorf("Detail = %q, want the login it belongs to", m.Detail)
+	}
+}
+
+func TestOnURLIsAlwaysSafeToCall(t *testing.T) {
+	stubLogins(t, sharedSession(), func(_ context.Context, req awsx.LoginRequest) error {
+		if req.OnURL == nil {
+			t.Error("OnURL must never be nil; awsx calls it without checking in the scanner")
+		}
+		return nil
+	})
+	runServe(t, `{"cmd":"ssoLogin","login":"company"}`+"\n")
 }

@@ -118,6 +118,15 @@ final class SSOLoginTests: XCTestCase {
         XCTAssertEqual(stale.status(at: now, check: .valid), "signed in")
     }
 
+    func testNoCachedTokenAtAllBeatsAPassedCheck() {
+        let gone = SSOLogin(label: "company")
+
+        XCTAssertFalse(
+            gone.signedIn(at: now, check: .valid),
+            "an expired token can be revived by a passing check, a missing one cannot")
+        XCTAssertEqual(gone.status(at: now, check: .valid), "signed out")
+    }
+
     func testAnUnknownCheckFallsBackToTheCache() {
         let renewable = SSOLogin(label: "company", refreshable: true)
         XCTAssertEqual(renewable.status(at: now, check: .unknown), "signed in")

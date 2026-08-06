@@ -6,6 +6,7 @@ Connect to EC2 instances over AWS SSM on macOS: a menubar port-forward manager a
 
 ```sh
 brew tap sratabix/taps
+brew trust sratabix/taps
 brew install --cask awsssh
 ```
 

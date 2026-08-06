@@ -5,6 +5,10 @@ struct ContentView: View {
     static let maxWidth: CGFloat = 560
     static let listMaxHeight: CGFloat = 420
 
+    static func erroredLabel(_ count: Int) -> String {
+        count == 1 ? "1 forward errored" : "\(count) forwards errored"
+    }
+
     @EnvironmentObject var model: AppModel
 
     var body: some View {
@@ -18,12 +22,16 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
                 Text("Port forwards").font(.headline)
-                Text(AppInfo.displayVersion)
-                    .font(.caption2.monospaced())
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 1)
-                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 3))
+                Button(action: { model.openWhatsNew() }) {
+                    Text(AppInfo.displayVersion)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(.quaternary, in: RoundedRectangle(cornerRadius: 3))
+                }
+                .buttonStyle(.plain)
+                .help("What's new in \(AppInfo.displayVersion)")
                 Spacer()
                 Text("\(model.forwards.count) saved · \(model.runningCount) running")
                     .font(.caption).foregroundStyle(.secondary)
@@ -60,14 +68,16 @@ struct ContentView: View {
                 Text(err).font(.caption).foregroundStyle(.orange)
             }
             let errored = model.errored
-            if errored.count > 1 {
+            if !errored.isEmpty {
                 HStack(spacing: 5) {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                    Text("\(errored.count) forwards errored").font(.caption)
+                    Text(ContentView.erroredLabel(errored.count)).font(.caption)
                     Spacer()
-                    Button("Dismiss all") { model.dismissErrors(errored) }
-                        .controlSize(.small)
-                        .help("Clear every error and the menubar badge")
+                    Button(errored.count == 1 ? "Dismiss" : "Dismiss all") {
+                        model.dismissErrors(errored)
+                    }
+                    .controlSize(.small)
+                    .help("Clear every error and the menubar badge")
                 }
             }
             UpdateBadge(updates: model.updates, installer: model.installer, running: model.runningCount)

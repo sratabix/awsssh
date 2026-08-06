@@ -6,6 +6,7 @@ final class AppModel: ObservableObject {
     static let reconnectCooldown: TimeInterval = 15
     static let loginPollInterval: TimeInterval = 60
     static let loginCheckInterval: TimeInterval = 300
+    static let autoSignInBackoff: TimeInterval = 900
 
     @Published var forwards: [Forward] = []
     @Published var states: [Int: EntryState] = [:]
@@ -23,9 +24,19 @@ final class AppModel: ObservableObject {
     @Published var checks: [String: LoginCheck] = [:]
     @Published var signingIn: String?
     @Published var signInError: String?
+    @Published var signInPending = false
     @Published var showingSettings = false
+    @Published var showingWhatsNew = false
+    @Published var showingWebSignIn = false
+    @Published private(set) var whatsNew: [ReleaseNotes.Section] = []
     @Published var showSSO = Preferences.showSSO {
-        didSet { Preferences.showSSO = showSSO }
+        didSet {
+            Preferences.showSSO = showSSO
+            if !showSSO { autoSignIn = false }
+        }
+    }
+    @Published var autoSignIn = Preferences.autoSignIn {
+        didSet { Preferences.autoSignIn = autoSignIn }
     }
     @Published var collapsedGroups = Preferences.collapsedGroups {
         didSet { Preferences.collapsedGroups = collapsedGroups }
@@ -37,15 +48,21 @@ final class AppModel: ObservableObject {
     private let helper = Helper()
     private let forms = FormWindowPresenter()
     private let settings = SettingsWindowPresenter()
+    private let news = WhatsNewWindowPresenter()
+    private let webWindow = WebSignInWindowPresenter()
     private let attached: Bool
     private var nextID = 1
     private var stamp: Date?
     private var awaitingRestart: Set<Int> = []
     private var wakeObserver: NSObjectProtocol?
-    private let network = NetworkMonitor()
+    let network = NetworkMonitor()
+    let screen = ScreenLock()
+    let presentation = Presentation()
+    let webSignIn = WebSignIn()
     private var lastReconnect: Date?
     private var loginPoll: Timer?
     private var lastChecked: [String: Date] = [:]
+    private var lastAutoSignIn: [String: Date] = [:]
 
     init(attached: Bool = true) {
         self.attached = attached
@@ -60,6 +77,8 @@ final class AppModel: ObservableObject {
 
         forms.attach(to: self)
         settings.attach(to: self)
+        news.attach(to: self)
+        webWindow.attach(to: self)
         helper.onMessage = { [weak self] msg in self?.handle(msg) }
         helper.start()
         helper.send(HelperCommand(cmd: "profiles"))
@@ -88,8 +107,19 @@ final class AppModel: ObservableObject {
             }
         }
 
-        network.onChange = { [weak self] in self?.reconnectLiveForwards(reason: .network) }
+        network.onChange = { [weak self] in
+            self?.reconnectLiveForwards(reason: .network)
+            self?.maybeAutoSignIn()
+        }
         network.start()
+
+        screen.onUnlock = { [weak self] in
+            self?.refreshLogins()
+            self?.maybeAutoSignIn()
+        }
+        screen.start()
+
+        announceUpdate()
 
         loginPoll = Timer.scheduledTimer(
             withTimeInterval: AppModel.loginPollInterval,
@@ -123,6 +153,40 @@ final class AppModel: ObservableObject {
     }
 
     func check(for login: SSOLogin) -> LoginCheck { checks[login.label] ?? .unknown }
+
+    var unscopedLogins: [SSOLogin] { logins.filter { !$0.scoped && !$0.refreshable } }
+
+    func signedOutLogins(at now: Date) -> [SSOLogin] {
+        logins.filter { !$0.signedIn(at: now, check: check(for: $0)) }
+    }
+
+    var deferAutoSignIn: Bool {
+        !network.reachable || screen.locked || presentation.active
+    }
+
+    func maybeAutoSignIn(now: Date = Date()) {
+        var expired: [SSOLogin] = []
+        for login in logins {
+            if login.signedIn(at: now, check: check(for: login)) {
+                lastAutoSignIn[login.label] = nil
+            } else {
+                expired.append(login)
+            }
+        }
+
+        guard autoSignIn, showSSO, signingIn == nil, !deferAutoSignIn else { return }
+
+        for login in expired {
+            if let last = lastAutoSignIn[login.label],
+                now.timeIntervalSince(last) < Self.autoSignInBackoff
+            {
+                continue
+            }
+            lastAutoSignIn[login.label] = now
+            signIn(login, silent: true)
+            return
+        }
+    }
 
     private func syncHotKeys() {
         guard attached else { return }
@@ -200,6 +264,26 @@ final class AppModel: ObservableObject {
         showingSettings = false
     }
 
+    func announceUpdate(current: String = AppInfo.version, notes: String = ReleaseNotes.bundled()) {
+        let seen = Preferences.lastSeenVersion
+        Preferences.lastSeenVersion = current
+        guard !seen.isEmpty, seen != current else { return }
+
+        let sections = ReleaseNotes.forUpdate(from: seen, to: current, in: notes)
+        guard !sections.isEmpty else { return }
+        whatsNew = sections
+        showingWhatsNew = true
+    }
+
+    func openWhatsNew(current: String = AppInfo.version, notes: String = ReleaseNotes.bundled()) {
+        whatsNew = ReleaseNotes.forCurrent(current, in: notes)
+        showingWhatsNew = true
+    }
+
+    func closeWhatsNew() {
+        showingWhatsNew = false
+    }
+
     func revealStore() {
         let target = Store.revealTarget()
         if target.hasDirectoryPath {
@@ -209,11 +293,38 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func signIn(_ login: SSOLogin) {
+    func signIn(_ login: SSOLogin, silent: Bool = false) {
         guard signingIn == nil else { return }
         signInError = nil
         signingIn = login.label
+        signInPending = false
+
+        if attached {
+            webSignIn.onFailure = { [weak self] message in self?.webSignInFailed(message) }
+        }
+        if !silent { showingWebSignIn = true }
         helper.send(HelperCommand(cmd: "ssoLogin", login: login.label))
+    }
+
+    private func revealWebSignIn() {
+        guard signingIn != nil else { return }
+        showingWebSignIn = true
+    }
+
+    private func webSignInFailed(_ message: String) {
+        guard signingIn != nil else { return }
+        signInError = "the sign-in window could not load: \(message)"
+        revealWebSignIn()
+    }
+
+    func cancelWebSignIn() {
+        showingWebSignIn = false
+        webSignIn.reset()
+    }
+
+    private func endWebSignIn() {
+        showingWebSignIn = false
+        if attached { webSignIn.reset() }
     }
 
     var groups: [ForwardGroup] { ForwardGroup.build(from: forwards) }
@@ -497,15 +608,28 @@ final class AppModel: ObservableObject {
             profiles = msg.profiles ?? []
         case "logins":
             logins = (msg.logins ?? []).map(SSOLogin.init)
-            checkLogins()
+            checkLogins(now: now)
+            maybeAutoSignIn(now: now)
         case "loginCheck":
             if let label = msg.detail {
                 checks[label] = LoginCheck(msg.state)
             }
+            maybeAutoSignIn(now: now)
+        case "authorizeURL":
+            guard signingIn == msg.detail, attached,
+                let raw = msg.url, let url = URL(string: raw)
+            else { break }
+            webSignIn.load(url)
+        case "ssoLoginPending":
+            guard signingIn != nil, signingIn == msg.detail else { break }
+            signInPending = true
+            revealWebSignIn()
         case "ssoLogin":
             if signingIn == nil || signingIn == msg.detail {
                 signingIn = nil
-                signInError = msg.error
+                signInPending = false
+                if signInError == nil || msg.error != nil { signInError = msg.error }
+                endWebSignIn()
             }
             if msg.error == nil, let label = msg.detail {
                 checks[label] = nil

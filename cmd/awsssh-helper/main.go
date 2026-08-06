@@ -36,6 +36,7 @@ type loginInfo struct {
 	Profiles    []string `json:"profiles"`
 	Expires     string   `json:"expires,omitempty"`
 	Refreshable bool     `json:"refreshable,omitempty"`
+	Scoped      bool     `json:"scoped,omitempty"`
 }
 
 type message struct {
@@ -46,6 +47,7 @@ type message struct {
 	Profiles []string    `json:"profiles,omitempty"`
 	Logins   []loginInfo `json:"logins,omitempty"`
 	State    string      `json:"state,omitempty"`
+	URL      string      `json:"url,omitempty"`
 }
 
 type output struct {
@@ -140,7 +142,7 @@ func handle(
 		background.Add(1)
 		go func() {
 			defer background.Done()
-			signIn(ctx, c.Login, out)
+			signIn(ctx, c, out)
 		}()
 	case "checkLogin":
 		background.Add(1)
@@ -157,6 +159,7 @@ var (
 	listLogins   = awsx.Logins
 	ssoLogin     = awsx.RunSSOLogin
 	loginChecker = awsx.CheckLogin
+	signInGrace  = 12 * time.Second
 )
 
 func checkLogin(ctx context.Context, label string, out *output) {
@@ -181,6 +184,7 @@ func loginList() message {
 			Label:       login.Label(),
 			Profiles:    login.Profiles,
 			Refreshable: login.Refreshable,
+			Scoped:      login.Scoped,
 		}
 		if !login.Expires.IsZero() {
 			info.Expires = login.Expires.Format(time.RFC3339)
@@ -190,18 +194,44 @@ func loginList() message {
 	return message{Event: "logins", Logins: infos}
 }
 
-func signIn(ctx context.Context, label string, out *output) {
+func signIn(ctx context.Context, c command, out *output) {
 	for _, login := range listLogins() {
-		if login.Label() != label {
+		if login.Label() != c.Login {
 			continue
 		}
-		if err := ssoLogin(ctx, login); err != nil {
-			out.send(message{Event: "ssoLogin", Detail: label, Error: err.Error()})
+		err := runWithGrace(ctx, login, out)
+		if err != nil {
+			out.send(message{Event: "ssoLogin", Detail: c.Login, Error: err.Error()})
 			return
 		}
-		out.send(message{Event: "ssoLogin", Detail: label})
+		out.send(message{Event: "ssoLogin", Detail: c.Login})
 		out.send(loginList())
 		return
 	}
-	out.send(message{Event: "ssoLogin", Detail: label, Error: "no SSO sign-in named " + label})
+	out.send(message{Event: "ssoLogin", Detail: c.Login, Error: "no SSO sign-in named " + c.Login})
+}
+
+func runWithGrace(ctx context.Context, login awsx.Login, out *output) error {
+	done := make(chan struct{})
+	var pending sync.WaitGroup
+
+	pending.Add(1)
+	go func() {
+		defer pending.Done()
+		select {
+		case <-done:
+		case <-time.After(signInGrace):
+			out.send(message{Event: "ssoLoginPending", Detail: login.Label()})
+		}
+	}()
+
+	err := ssoLogin(ctx, awsx.LoginRequest{
+		Login: login,
+		OnURL: func(url string) {
+			out.send(message{Event: "authorizeURL", Detail: login.Label(), URL: url})
+		},
+	})
+	close(done)
+	pending.Wait()
+	return err
 }

@@ -1,13 +1,16 @@
 package awsx
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -17,8 +20,11 @@ import (
 )
 
 const (
-	awsBinary    = "aws"
-	loginTimeout = 3 * time.Minute
+	awsBinary     = "aws"
+	loginTimeout  = 3 * time.Minute
+	browserEnvKey = "BROWSER"
+	urlMarker     = "AWSSSH-AUTHORIZE-URL"
+	urlEmitter    = "/bin/echo " + urlMarker + " %s"
 )
 
 type Login struct {
@@ -28,6 +34,7 @@ type Login struct {
 	Profiles    []string
 	Expires     time.Time
 	Refreshable bool
+	Scoped      bool
 }
 
 func (l Login) Label() string {
@@ -69,6 +76,7 @@ func Logins() []Login {
 			Session:  name,
 			StartURL: s.keys["sso_start_url"],
 			Region:   s.keys["sso_region"],
+			Scoped:   s.keys["sso_registration_scopes"] != "",
 		}
 		order = append(order, sessions[name])
 	}
@@ -183,7 +191,27 @@ func classify(err error) LoginState {
 
 var loginRunning sync.Mutex
 
-func RunSSOLogin(ctx context.Context, login Login) error {
+type LoginRequest struct {
+	Login Login
+	OnURL func(string)
+}
+
+func loginEnviron(base []string) []string {
+	return append(slices.Clone(base), browserEnvKey+"="+urlEmitter)
+}
+
+func authorizeURL(line string) (string, bool) {
+	fields := strings.Fields(line)
+	if len(fields) != 2 || fields[0] != urlMarker {
+		return "", false
+	}
+	if !strings.HasPrefix(fields[1], "https://") {
+		return "", false
+	}
+	return fields[1], true
+}
+
+func RunSSOLogin(ctx context.Context, req LoginRequest) error {
 	if !loginRunning.TryLock() {
 		return errors.New("a sign-in is already in progress")
 	}
@@ -197,18 +225,47 @@ func RunSSOLogin(ctx context.Context, login Login) error {
 	timed, cancel := context.WithTimeout(ctx, loginTimeout)
 	defer cancel()
 
-	combined, err := exec.CommandContext(timed, path, login.Args()...).CombinedOutput()
+	cmd := exec.CommandContext(timed, path, req.Login.Args()...)
+	cmd.Env = loginEnviron(os.Environ())
+
+	reader, writer := io.Pipe()
+	cmd.Stdout = writer
+	cmd.Stderr = writer
+
+	collected := make(chan string, 1)
+	go func() {
+		var seen strings.Builder
+		scanner := bufio.NewScanner(reader)
+		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if url, ok := authorizeURL(line); ok {
+				if req.OnURL != nil {
+					req.OnURL(url)
+				}
+				continue
+			}
+			seen.WriteString(line)
+			seen.WriteByte('\n')
+		}
+		collected <- seen.String()
+	}()
+
+	err = cmd.Run()
+	_ = writer.Close()
+	combined := <-collected
+
 	switch {
 	case err == nil:
 		return nil
 	case errors.Is(timed.Err(), context.DeadlineExceeded):
 		return fmt.Errorf(
-			"sign-in was not completed within %s; approve the page the browser opened",
+			"sign-in was not completed within %s; approve the page in the sign-in window",
 			loginTimeout)
 	case ctx.Err() != nil:
 		return errors.New("sign-in was cancelled")
 	default:
-		if msg := lastMeaningfulLine(string(combined)); msg != "" {
+		if msg := lastMeaningfulLine(combined); msg != "" {
 			return errors.New(msg)
 		}
 		return fmt.Errorf("aws sso login failed: %w", err)

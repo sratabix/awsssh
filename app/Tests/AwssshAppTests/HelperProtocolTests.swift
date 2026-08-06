@@ -244,4 +244,51 @@ final class HelperProtocolTests: XCTestCase {
         XCTAssertEqual(back.forward?.instance, "name with spaces & symbols")
         XCTAssertEqual(back.forward?.host, "hôst.internal")
     }
+
+    func testASignInCommandCarriesOnlyTheLogin() throws {
+        let object = try encode(HelperCommand(cmd: "ssoLogin", login: "company"))
+
+        XCTAssertEqual(object["cmd"] as? String, "ssoLogin")
+        XCTAssertEqual(object["login"] as? String, "company")
+        XCTAssertNil(
+            object["background"], "the browser modes are gone; the helper only knows one way in")
+        XCTAssertNil(object["embedded"])
+    }
+
+    func testAnAuthorizeURLMessageCarriesTheURL() throws {
+        let message = try decode(
+            #"{"event":"authorizeURL","detail":"company","url":"https://oidc.example/authorize?x=1"}"#)
+
+        XCTAssertEqual(message.event, "authorizeURL")
+        XCTAssertEqual(message.detail, "company")
+        XCTAssertEqual(message.url, "https://oidc.example/authorize?x=1")
+    }
+
+    func testALoginSaysWhetherItsSessionCanRenew() throws {
+        let message = try decode(
+            """
+            {"event":"logins","logins":[{"label":"company","profiles":["dev"],\
+            "refreshable":true,"scoped":true}]}
+            """)
+
+        let login = try XCTUnwrap(message.logins?.first)
+        XCTAssertEqual(login.refreshable, true)
+        XCTAssertEqual(login.scoped, true)
+    }
+
+    func testAnOlderHelperWithoutScopedStillDecodes() throws {
+        let message = try decode(
+            #"{"event":"logins","logins":[{"label":"company","profiles":["dev"]}]}"#)
+
+        let login = try XCTUnwrap(message.logins?.first)
+        XCTAssertNil(login.scoped)
+        XCTAssertFalse(SSOLogin(login).scoped)
+    }
+
+    func testAPendingSignInNamesTheLoginItIsWaitingOn() throws {
+        let message = try decode(#"{"event":"ssoLoginPending","detail":"company"}"#)
+
+        XCTAssertEqual(message.event, "ssoLoginPending")
+        XCTAssertEqual(message.detail, "company")
+    }
 }

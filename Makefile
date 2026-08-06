@@ -78,6 +78,8 @@ app:
 	@echo ">> swift: $(SWIFT_ARCH)"
 	$(SWIFT_BUILD)
 	cp $(SWIFT_PRODUCT) $(APP)/Contents/MacOS/Awsssh
+	@echo ">> release notes"
+	cp CHANGELOG.md $(RES)/CHANGELOG.md
 	@echo ">> icon"
 	swift build --package-path app -c release --product IconExport
 	app/.build/release/IconExport $(BUILD)/Awsssh.iconset
@@ -98,6 +100,7 @@ verify-app:
 	@$(call require_file,$(RES)/completions/$(BINARY).bash)
 	@$(call require_file,$(RES)/completions/$(BINARY).fish)
 	@$(call require_file,$(RES)/Awsssh.icns)
+	@$(call require_file,$(RES)/CHANGELOG.md)
 	@test -x $(RES)/$(BINARY) || { echo "missing $(BINARY)"; exit 1; }
 	@test -x $(RES)/$(BINARY)-helper || { echo "missing $(BINARY)-helper"; exit 1; }
 	@codesign --verify --deep --strict $(APP)

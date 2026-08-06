@@ -29,6 +29,15 @@ final class PreferencesTests: XCTestCase {
         XCTAssertTrue(Preferences.showSSO)
     }
 
+    func testAutomaticSignInIsOffUntilItIsAskedFor() {
+        XCTAssertFalse(
+            Preferences.autoSignIn,
+            "a browser opening by itself must never be the default")
+
+        Preferences.autoSignIn = true
+        XCTAssertTrue(Preferences.autoSignIn)
+    }
+
     func testTheChoiceOutlivesTheObject() {
         Preferences.showSSO = false
         XCTAssertFalse(

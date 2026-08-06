@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -701,4 +702,94 @@ func FuzzSignedInAgreesWithItsInputs(f *testing.F) {
 				offset, refreshable, got, want)
 		}
 	})
+}
+
+const scopedSessionConfig = `
+[sso-session company]
+sso_start_url = https://example.awsapps.com/start
+sso_region = eu-central-1
+sso_registration_scopes = sso:account:access
+
+[profile dev]
+sso_session = company
+sso_account_id = 1
+`
+
+func TestLoginsReportWhetherTheSessionIsRegisteredForRefresh(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		config string
+		want   bool
+	}{
+		{"with the scope", scopedSessionConfig, true},
+		{"without the scope", sessionConfig, false},
+		{"legacy start url", "[profile main]\nsso_start_url = https://legacy.awsapps.com/start\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			awsFiles(t, tc.config, "")
+			ssoCache(t, nil)
+
+			logins := Logins()
+			if len(logins) == 0 {
+				t.Fatal("want at least one login")
+			}
+			if logins[0].Scoped != tc.want {
+				t.Errorf("Scoped = %v, want %v", logins[0].Scoped, tc.want)
+			}
+		})
+	}
+}
+
+func TestTheLoginHandsTheURLToUsInsteadOfABrowser(t *testing.T) {
+	base := []string{"PATH=/usr/bin"}
+	got := loginEnviron(base)
+
+	if len(got) != 2 {
+		t.Fatalf("got %v, want the base plus one entry", got)
+	}
+	value, ok := strings.CutPrefix(got[1], browserEnvKey+"=")
+	if !ok {
+		t.Fatalf("last entry = %q, want a %s assignment", got[1], browserEnvKey)
+	}
+	if !strings.Contains(value, urlMarker) {
+		t.Errorf("%s = %q, must echo the marker we scan for", browserEnvKey, value)
+	}
+	if !strings.Contains(value, "%s") {
+		t.Errorf("%s = %q, must carry %%s or the URL is never substituted", browserEnvKey, value)
+	}
+	if strings.Contains(value, "open") {
+		t.Errorf("%s = %q, no sign-in may reach a real browser any more", browserEnvKey, value)
+	}
+	if !slices.Equal(base, []string{"PATH=/usr/bin"}) {
+		t.Errorf("the caller's environment was mutated: %v", base)
+	}
+}
+
+func TestOurBrowserSettingWinsOverAnInheritedOne(t *testing.T) {
+	got := loginEnviron([]string{browserEnvKey + "=/usr/bin/open"})
+
+	if len(got) != 2 || !strings.Contains(got[1], urlMarker) {
+		t.Errorf("ours must come last so exec's dedup keeps it, got %v", got)
+	}
+}
+
+func TestAuthorizeURLOnlyAcceptsOurOwnMarkerLine(t *testing.T) {
+	good := urlMarker + " https://oidc.eu-central-1.amazonaws.com/authorize?x=1"
+	if url, ok := authorizeURL(good); !ok || url != "https://oidc.eu-central-1.amazonaws.com/authorize?x=1" {
+		t.Errorf("authorizeURL(%q) = %q, %v", good, url, ok)
+	}
+
+	for _, line := range []string{
+		"",
+		"Attempting to open your default browser",
+		urlMarker,
+		urlMarker + " not-a-url",
+		urlMarker + " http://insecure.example",
+		urlMarker + " https://ok.example extra",
+		"prefix " + urlMarker + " https://ok.example",
+	} {
+		if url, ok := authorizeURL(line); ok {
+			t.Errorf("authorizeURL(%q) accepted %q, want rejected", line, url)
+		}
+	}
 }

@@ -1,0 +1,65 @@
+# Changelog
+
+## v1.0.1
+
+- Add automatic sso sign-in, in its own window instead of a browser.
+- Hide signin button when signed in.
+- Dismiss all errors even when there's only one to dismiss.
+- Whats new window in settings
+
+## v1.0.0
+
+- Dismiss all errored forwards at once.
+
+## v0.0.9
+
+- A bottom fade on the list marks that there is more below.
+
+## v0.0.8
+
+- The menubar icon fits the menu bar and stays sharp across displays.
+- The attention badge is sized to the glyph.
+
+## v0.0.7
+
+- Update from inside the app. The download is checked against the SHA-256 GitHub publishes, and the bundle is swapped in place, so the CLI and completions keep working.
+- Asks before installing when forwards are running, and says how many will stop.
+- A failed update can be retried or dismissed.
+
+## v0.0.6
+
+- Groups, with a start and stop button per group.
+- Groups collapse, and stay collapsed.
+- The list scrolls once it gets long.
+- Signed-in state is re-checked while the app runs, so a terminal login shows up.
+
+## v0.0.5
+
+- Sign in to AWS SSO from the panel: one button per SSO session.
+- Colour a forward from a swatch or a hex value.
+- Settings window, holding launch at login and the SSO row toggle.
+- The add and edit form opens in its own window.
+
+## v0.0.4
+
+- Share a forward to the clipboard and import one you were sent.
+- A forward that ends on its own says why.
+- Long names and status lines scroll horizontally.
+
+## v0.0.3
+
+- Full error text per row, in a panel you can expand and dismiss.
+- Releases carry a VirusTotal report link.
+
+## v0.0.2
+
+- Forwards reconnect after a laptop wake or a network change.
+- Each running forward shows how long it has been up.
+- The menubar icon is badged when a forward needs attention.
+
+## v0.0.1
+
+- First release.
+- Menubar app for EC2 port forwards over SSM, saved between launches, each with an optional global hotkey.
+- `awsssh` CLI for a shell on an instance over SSM.
+- zsh, bash and fish completions.
