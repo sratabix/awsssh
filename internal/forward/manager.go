@@ -68,48 +68,49 @@ func (m *Manager) Start(id int, s Spec) {
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
-		defer func() {
-			m.mu.Lock()
-			delete(m.cancels, id)
-			m.mu.Unlock()
-		}()
+		defer cancel()
 
-		b, err := m.provider.Get(s.Profile, s.Region)
-		if err != nil {
-			m.emit(exitEvent(id, err))
-			return
-		}
-		target, err := b.Client.LookupRunning(ctx, s.Instance)
-		if err != nil {
-			m.emit(exitEvent(id, err))
-			return
-		}
-		cmd, err := b.Starter.ForwardCommand(ctx, target.InstanceID, session.Forward{
-			LocalPort:  s.LocalPort,
-			Host:       s.Host,
-			RemotePort: s.RemotePort,
-		})
-		if err != nil {
-			m.emit(exitEvent(id, err))
-			return
-		}
+		ev := m.run(ctx, id, s)
 
-		out, errs := newTailBuffer(tailBytes), newTailBuffer(tailBytes)
-		cmd.Stdout = out
-		cmd.Stderr = errs
-		if err := cmd.Start(); err != nil {
-			m.emit(exitEvent(id, err))
-			return
-		}
-		m.emit(Event{ID: id, Kind: Started, Detail: "localhost:" + s.LocalPort})
+		m.mu.Lock()
+		delete(m.cancels, id)
+		m.mu.Unlock()
 
-		werr := cmd.Wait()
-		if ctx.Err() != nil {
-			m.emit(Event{ID: id, Kind: Exited})
-			return
-		}
-		m.emit(exitEvent(id, endedReason(werr, errs.String(), out.String())))
+		m.emit(ev)
 	}()
+}
+
+func (m *Manager) run(ctx context.Context, id int, s Spec) Event {
+	b, err := m.provider.Get(s.Profile, s.Region)
+	if err != nil {
+		return exitEvent(id, err)
+	}
+	target, err := b.Client.LookupRunning(ctx, s.Instance)
+	if err != nil {
+		return exitEvent(id, err)
+	}
+	cmd, err := b.Starter.ForwardCommand(ctx, target.InstanceID, session.Forward{
+		LocalPort:  s.LocalPort,
+		Host:       s.Host,
+		RemotePort: s.RemotePort,
+	})
+	if err != nil {
+		return exitEvent(id, err)
+	}
+
+	out, errs := newTailBuffer(tailBytes), newTailBuffer(tailBytes)
+	cmd.Stdout = out
+	cmd.Stderr = errs
+	if err := cmd.Start(); err != nil {
+		return exitEvent(id, err)
+	}
+	m.emit(Event{ID: id, Kind: Started, Detail: "localhost:" + s.LocalPort})
+
+	werr := cmd.Wait()
+	if ctx.Err() != nil {
+		return Event{ID: id, Kind: Exited}
+	}
+	return exitEvent(id, endedReason(werr, errs.String(), out.String()))
 }
 
 func (m *Manager) Stop(id int) {
