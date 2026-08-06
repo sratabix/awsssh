@@ -13,7 +13,7 @@ struct WhatsNewView: View {
                 Image(systemName: "sparkles").foregroundStyle(.orange)
                 Text(title).font(.headline)
             }
-            ScrollView {
+            ScrollingList(maxHeight: WhatsNewView.maxHeight) {
                 VStack(alignment: .leading, spacing: 14) {
                     ForEach(model.whatsNew) { section in
                         VStack(alignment: .leading, spacing: 5) {
@@ -30,9 +30,7 @@ struct WhatsNewView: View {
                         }
                     }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .frame(maxHeight: WhatsNewView.maxHeight)
             Divider()
             HStack {
                 Spacer()
