@@ -7,6 +7,10 @@ enum AppInfo {
 
     static var displayVersion: String { "v" + version }
 
+    nonisolated static func isRelease(_ version: String) -> Bool {
+        !version.contains("-") && UpdateChecker.isNewer(remote: version, current: "0.0.0")
+    }
+
     static var userAgent: String { "Awsssh/" + version }
 }
 

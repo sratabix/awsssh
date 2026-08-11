@@ -284,9 +284,13 @@ final class AppModel: ObservableObject {
     }
 
     func announceUpdate(current: String = AppInfo.version, notes: String = ReleaseNotes.bundled()) {
+        guard AppInfo.isRelease(current) else { return }
+
         let seen = Preferences.lastSeenVersion
-        Preferences.lastSeenVersion = current
-        guard !seen.isEmpty, seen != current else { return }
+        let moved = seen.isEmpty || UpdateChecker.isNewer(remote: current, current: seen)
+        if moved { Preferences.lastSeenVersion = current }
+
+        guard moved, !seen.isEmpty, AppInfo.isRelease(seen) else { return }
 
         let sections = ReleaseNotes.forUpdate(from: seen, to: current, in: notes)
         guard !sections.isEmpty else { return }

@@ -641,6 +641,54 @@ final class AppModelTests: XCTestCase {
             "the version still has to be recorded, or it retries on every launch")
     }
 
+    @MainActor func testADevelopmentBuildNeitherAnnouncesNorRecordsAnything() {
+        Preferences.lastSeenVersion = "1.0.2"
+        let m = model()
+
+        m.announceUpdate(current: "0.0.0-dev", notes: notes)
+
+        XCTAssertFalse(m.showingWhatsNew)
+        XCTAssertEqual(
+            Preferences.lastSeenVersion, "1.0.2",
+            "a local build must not touch the record the installed app keeps")
+    }
+
+    @MainActor func testAVersionRecordedByADevelopmentBuildDoesNotReplayTheWholeHistory() {
+        Preferences.lastSeenVersion = "0.0.0-dev"
+        let m = model()
+
+        m.announceUpdate(current: "1.0.0", notes: notes)
+
+        XCTAssertFalse(
+            m.showingWhatsNew,
+            "0.0.0 reads as older than every release, which dumped every section ever written")
+        XCTAssertEqual(Preferences.lastSeenVersion, "1.0.0")
+    }
+
+    @MainActor func testTheRecordedVersionNeverMovesBackwards() {
+        Preferences.lastSeenVersion = "1.0.1"
+        let m = model()
+
+        m.announceUpdate(current: "0.9.0", notes: notes)
+
+        XCTAssertFalse(m.showingWhatsNew, "an older build has nothing new to announce")
+        XCTAssertEqual(
+            Preferences.lastSeenVersion, "1.0.1",
+            "rewinding it would replay the notes on the way back up")
+    }
+
+    @MainActor func testAJumpOfSeveralVersionsStillShowsEveryReleaseBetween() {
+        Preferences.lastSeenVersion = "0.8.0"
+        let m = model()
+
+        m.announceUpdate(current: "1.0.1", notes: notes)
+
+        XCTAssertTrue(m.showingWhatsNew)
+        XCTAssertEqual(
+            m.whatsNew.map(\.version), ["1.0.0", "0.9.0"],
+            "skipping releases is normal; every section since the last one seen belongs here")
+    }
+
     @MainActor func testWhatsNewCanBeOpenedByHand() {
         let m = model()
         m.openWhatsNew(current: "0.9.0", notes: notes)

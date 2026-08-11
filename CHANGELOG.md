@@ -8,6 +8,11 @@
 - Automatic sign-in waits for DNS to answer, not just for a network.
 - A long sign-in error wraps instead of being cut off.
 - The list can no longer be dragged sideways, and a name only scrolls when it is cut off.
+- What's new no longer replays every release ever written after a local build has run.
+
+## v1.0.2
+
+- The what's new window scrolls when there is more than fits, with a fade at the bottom.
 
 ## v1.0.1
 
