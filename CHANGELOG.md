@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.0.4
+
+- What's new no longer replays every release ever written after a local build has run.
+
 ## v1.0.3
 
 - Test a forward from the form before saving it. It opens the tunnel and connects to the target.
@@ -8,7 +12,6 @@
 - Automatic sign-in waits for DNS to answer, not just for a network.
 - A long sign-in error wraps instead of being cut off.
 - The list can no longer be dragged sideways, and a name only scrolls when it is cut off.
-- What's new no longer replays every release ever written after a local build has run.
 
 ## v1.0.2
 
