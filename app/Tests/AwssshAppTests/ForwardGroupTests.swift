@@ -95,6 +95,25 @@ final class ForwardGroupTests: XCTestCase {
         XCTAssertEqual(f.group, "")
     }
 
+    func testTheTemporaryGroupSortsBeforeEverythingElse() {
+        let groups = ForwardGroup.build(from: [
+            forward(1, group: "alpha"),
+            forward(2, group: ForwardGroup.temporaryName),
+            forward(3, group: "beta"),
+            forward(4),
+        ])
+        XCTAssertEqual(
+            groups.map(\.name), [ForwardGroup.temporaryName, "alpha", "beta", ""],
+            "what you just started belongs at the top, ungrouped stays at the bottom")
+        XCTAssertTrue(groups[0].isTemporary)
+        XCTAssertFalse(groups[1].isTemporary)
+    }
+
+    func testTheTemporaryGroupIsNotOfferedAsASavedGroupName() {
+        let names = ForwardGroup.names(in: [forward(1, group: "alpha")])
+        XCTAssertEqual(names, ["alpha"], "the picker lists saved groups, and it is built from those")
+    }
+
     func testTheGroupSurvivesACodableRoundTrip() throws {
         var f = forward(1, group: "databases")
         f.color = "#FF453A"

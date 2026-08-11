@@ -33,23 +33,50 @@ struct Forward: Identifiable, Codable, Equatable {
         hotKey = (try? c.decodeIfPresent(HotKey.self, forKey: .hotKey)) ?? nil
     }
 
+    var isTemporary: Bool { id < 0 }
+
     var profileLabel: String { profile.isEmpty ? "default" : profile }
     var target: String { host.isEmpty ? "instance:\(remotePort)" : "\(host):\(remotePort)" }
     var route: String { "\(localPort) → \(target)" }
     var title: String { name.isEmpty ? route : name }
 
-    func validate() -> String? {
+    private func validateInstance() -> String? {
         if instance.trimmingCharacters(in: .whitespaces).isEmpty {
             return "Instance name is required."
         }
-        guard let l = Int(localPort), (1...65535).contains(l) else {
-            return "Local port must be a number 1–65535."
-        }
+        return nil
+    }
+
+    private func validateRemote() -> String? {
         guard let r = Int(remotePort), (1...65535).contains(r) else {
             return "Remote port must be a number 1–65535."
         }
         return nil
     }
+
+    private func validateLocal() -> String? {
+        guard let l = Int(localPort), (1...65535).contains(l) else {
+            return "Local port must be a number 1–65535."
+        }
+        return nil
+    }
+
+    func validateLocalIfGiven() -> String? {
+        localPort.isEmpty ? nil : validateLocal()
+    }
+
+    func validateTarget() -> String? {
+        validateInstance() ?? validateRemote()
+    }
+
+    func validate() -> String? {
+        validateInstance() ?? validateLocal() ?? validateRemote()
+    }
+}
+
+struct TestOutcome: Equatable {
+    var ok: Bool
+    var message: String
 }
 
 enum ReconnectReason: String {

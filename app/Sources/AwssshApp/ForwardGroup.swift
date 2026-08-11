@@ -4,7 +4,11 @@ struct ForwardGroup: Identifiable, Equatable {
     var name: String
     var forwards: [Forward]
 
+    static let temporaryName = "Temporary"
+
     var id: String { name }
+
+    var isTemporary: Bool { name == ForwardGroup.temporaryName }
 
     static func build(from forwards: [Forward]) -> [ForwardGroup] {
         var order: [String] = []
@@ -21,7 +25,10 @@ struct ForwardGroup: Identifiable, Equatable {
         let named =
             order
             .filter { !$0.isEmpty }
-            .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+            .sorted { a, b in
+                if (a == temporaryName) != (b == temporaryName) { return a == temporaryName }
+                return a.localizedCaseInsensitiveCompare(b) == .orderedAscending
+            }
 
         var out = named.map { ForwardGroup(name: $0, forwards: buckets[$0] ?? []) }
         if let loose = buckets[""] {

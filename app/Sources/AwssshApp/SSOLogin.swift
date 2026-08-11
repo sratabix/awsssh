@@ -11,21 +11,29 @@ enum LoginCheck: String {
 struct SSOLogin: Identifiable, Equatable {
     var label: String
     var profiles: [String]
+    var startURL: String
     var expires: Date?
     var refreshable: Bool
     var scoped: Bool
 
     var id: String { label }
 
+    var host: String {
+        guard let host = URL(string: startURL)?.host, !host.isEmpty else { return "" }
+        return host
+    }
+
     init(
         label: String,
         profiles: [String] = [],
+        startURL: String = "",
         expires: Date? = nil,
         refreshable: Bool = false,
         scoped: Bool = false
     ) {
         self.label = label
         self.profiles = profiles
+        self.startURL = startURL
         self.expires = expires
         self.refreshable = refreshable
         self.scoped = scoped
@@ -34,6 +42,7 @@ struct SSOLogin: Identifiable, Equatable {
     init(_ wire: HelperLogin) {
         label = wire.label
         profiles = wire.profiles ?? []
+        startURL = wire.startUrl ?? ""
         expires = wire.expires.flatMap(SSOLogin.parse)
         refreshable = wire.refreshable ?? false
         scoped = wire.scoped ?? false

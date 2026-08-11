@@ -1,5 +1,17 @@
 import SwiftUI
 
+struct OverflowMetrics: Equatable {
+    var content: CGFloat
+    var viewport: CGFloat
+    var scrolled: CGFloat
+
+    static let slack: CGFloat = 1
+
+    var hidden: CGFloat { max(0, content - viewport - scrolled) }
+    var overflows: Bool { content - viewport > OverflowMetrics.slack }
+    var showsMore: Bool { hidden > OverflowMetrics.slack }
+}
+
 struct OverflowScroll<Content: View>: View {
     @ViewBuilder var content: Content
 
@@ -10,8 +22,12 @@ struct OverflowScroll<Content: View>: View {
     private static var fadeWidth: CGFloat { 30 }
     private static var space: String { "overflowScroll" }
 
-    private var hidden: CGFloat { max(0, contentWidth - viewport - scrolled) }
-    private var showsMore: Bool { hidden > 1 }
+    private var metrics: OverflowMetrics {
+        OverflowMetrics(content: contentWidth, viewport: viewport, scrolled: scrolled)
+    }
+
+    private var showsMore: Bool { metrics.showsMore }
+    private var overflows: Bool { metrics.overflows }
 
     var body: some View {
         scroll
@@ -56,7 +72,7 @@ struct OverflowScroll<Content: View>: View {
     }
 
     private var base: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
+        ScrollView(.horizontal) {
             content
                 .fixedSize()
                 .background(
@@ -73,6 +89,8 @@ struct OverflowScroll<Content: View>: View {
                     }
                 )
         }
+        .scrollIndicators(.never)
+        .scrollDisabled(!overflows)
         .coordinateSpace(name: Self.space)
     }
 }

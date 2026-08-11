@@ -29,7 +29,7 @@ struct ScrollingList<Content: View>: View {
 
     @ViewBuilder private var scroll: some View {
         if #available(macOS 13.3, *) {
-            base.scrollBounceBehavior(.basedOnSize, axes: .vertical)
+            base.scrollBounceBehavior(.basedOnSize, axes: [.vertical, .horizontal])
         } else {
             base
         }
@@ -53,8 +53,9 @@ struct ScrollingList<Content: View>: View {
                             .onChange(of: offset) { scrolled = $0 }
                     }
                 )
+                .background(HorizontalScrollLock().frame(width: 0, height: 0))
         }
-        .scrollIndicators(.hidden)
+        .scrollIndicators(.never)
         .coordinateSpace(name: Self.space)
     }
 }

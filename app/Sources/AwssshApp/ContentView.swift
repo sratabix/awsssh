@@ -37,7 +37,7 @@ struct ContentView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             Divider()
-            if model.forwards.isEmpty {
+            if model.entries.isEmpty {
                 Text("No forwards yet — add one below.")
                     .font(.callout).foregroundStyle(.secondary)
                     .padding(.vertical, 6)
@@ -59,13 +59,13 @@ struct ContentView: View {
             Divider()
             SignInRow()
             if let err = model.launchAtLoginError {
-                Text(err).font(.caption).foregroundStyle(.orange)
+                NoticeText(err)
             }
             if let notice = model.dataNotice {
-                Text(notice).font(.caption).foregroundStyle(.orange)
+                NoticeText(notice)
             }
             if let err = model.importError {
-                Text(err).font(.caption).foregroundStyle(.orange)
+                NoticeText(err)
             }
             let errored = model.errored
             if !errored.isEmpty {
@@ -90,6 +90,10 @@ struct ContentView: View {
                     Label("Import", systemImage: "square.and.arrow.down")
                 }
                 .help("Add a forward from JSON on the clipboard")
+                Button(action: { model.beginQuickConnect() }) {
+                    Image(systemName: "bolt")
+                }
+                .help("Quick connect — start a forward without saving it")
                 Spacer()
                 Button(action: { model.openSettings() }) {
                     Image(systemName: "gearshape")
@@ -99,6 +103,25 @@ struct ContentView: View {
                 Button("Quit") { model.quit() }
             }
         }
+    }
+}
+
+struct NoticeText: View {
+    static let lines = 4
+
+    private let text: String
+
+    init(_ text: String) {
+        self.text = text
+    }
+
+    var body: some View {
+        Text(text)
+            .font(.caption)
+            .foregroundStyle(.orange)
+            .lineLimit(NoticeText.lines)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(idealWidth: 1, maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -309,10 +332,12 @@ struct ForwardRow: View {
                 Image(systemName: "square.and.arrow.up")
             }
             .buttonStyle(.borderless).help("Copy as JSON to share")
-            Button(action: { model.beginEdit(forward) }) {
-                Image(systemName: "pencil")
+            if !forward.isTemporary {
+                Button(action: { model.beginEdit(forward) }) {
+                    Image(systemName: "pencil")
+                }
+                .buttonStyle(.borderless).help("Edit")
             }
-            .buttonStyle(.borderless).help("Edit")
             Button(action: { model.confirmDelete(forward) }) {
                 Image(systemName: "trash")
             }

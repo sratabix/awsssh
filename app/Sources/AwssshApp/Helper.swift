@@ -19,6 +19,7 @@ struct HelperCommand: Codable {
 struct HelperLogin: Codable {
     var label: String
     var profiles: [String]?
+    var startUrl: String?
     var expires: String?
     var refreshable: Bool?
     var scoped: Bool?

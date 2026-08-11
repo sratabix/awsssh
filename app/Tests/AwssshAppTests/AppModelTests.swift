@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 import XCTest
 
 @testable import AwssshApp
@@ -544,6 +545,7 @@ final class AppModelTests: XCTestCase {
         m.logins = logins
         m.screen.lockedOverride = false
         m.presentation.activeOverride = false
+        m.dns.resolvedOverride = true
         return m
     }
 
@@ -719,6 +721,46 @@ final class AppModelTests: XCTestCase {
 
         m.network.observe(path(false))
         XCTAssertTrue(m.deferAutoSignIn)
+        m.network.observe(path(true))
+
+        m.dns.resolvedOverride = false
+        XCTAssertTrue(m.deferAutoSignIn)
+    }
+
+    @MainActor func testAnUnresolvedHostIsNotSignedInAutomatically() {
+        let m = autoModel([SSOLogin(label: "company", startURL: "https://portal.example.com/start")])
+        m.dns.resolvedOverride = false
+
+        m.maybeAutoSignIn()
+
+        XCTAssertNil(
+            m.signingIn,
+            "a satisfied path is not a working resolver — the login would fail on DNS")
+    }
+
+    @MainActor func testWorkingDNSDoesNotConsumeTheBackoff() {
+        let m = autoModel([SSOLogin(label: "company")])
+        let start = Date()
+
+        m.dns.resolvedOverride = false
+        m.maybeAutoSignIn(now: start)
+        XCTAssertNil(m.signingIn)
+
+        m.dns.resolvedOverride = true
+        m.maybeAutoSignIn(now: start.addingTimeInterval(1))
+        XCTAssertEqual(
+            m.signingIn, "company",
+            "waiting for the network to settle must not count as an attempt")
+    }
+
+    @MainActor func testTheProbedHostIsTheOneTheSignInNeeds() {
+        let m = autoModel([SSOLogin(label: "company", startURL: "https://portal.example.com/start")])
+        XCTAssertEqual(
+            m.signInHost, "portal.example.com",
+            "the portal is what a split-DNS VPN fails to resolve, not the internet at large")
+
+        m.logins = [SSOLogin(label: "legacy")]
+        XCTAssertEqual(m.signInHost, DNSCheck.fallbackHost, "an unknown start URL still needs a probe")
     }
 
     @MainActor func testALockedScreenIsNotSignedInAutomatically() {
@@ -1773,6 +1815,302 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(
             NSPasteboard.general.string(forType: .string),
             "session-manager-plugin exited with status 1")
+    }
+
+    @MainActor private func quickConnect(_ m: AppModel, port: String = "6099") -> Forward {
+        m.beginQuickConnect()
+        var draft = m.editing ?? Forward(id: -1)
+        draft.name = "one-off"
+        draft.instance = "db"
+        draft.localPort = port
+        draft.remotePort = "5432"
+        m.saveForm(draft)
+        return m.temporaries.last ?? draft
+    }
+
+    @MainActor func testQuickConnectStartsAForwardThatIsNeverSaved() {
+        let m = model()
+        let temp = quickConnect(m)
+
+        XCTAssertEqual(m.temporaries.count, 1)
+        XCTAssertTrue(m.forwards.isEmpty, "a temporary must not join the saved list")
+        XCTAssertTrue(Store.load().forwards.isEmpty, "and nothing may reach forwards.json")
+        XCTAssertEqual(m.state(for: temp).run, .starting, "connecting is the whole point")
+        XCTAssertFalse(m.showingForm)
+    }
+
+    @MainActor func testATemporaryIsListedFirstAndCountedAsRunning() {
+        let m = model()
+        m.saveForm(forward(1, port: "5432", name: "saved"))
+        let temp = quickConnect(m)
+        m.handle(HelperMessage(event: "started", id: temp.id))
+
+        XCTAssertEqual(m.groups.map(\.name), [ForwardGroup.temporaryName, ""])
+        XCTAssertEqual(m.groups[0].forwards.map(\.id), [temp.id])
+        XCTAssertEqual(m.runningCount, 1)
+        XCTAssertEqual(m.forwards.count, 1, "the saved count must not include it")
+    }
+
+    @MainActor func testATemporaryDisappearsWhenItStops() {
+        let m = model()
+        let temp = quickConnect(m)
+        m.handle(HelperMessage(event: "started", id: temp.id))
+
+        m.toggle(temp)
+        m.handle(HelperMessage(event: "exited", id: temp.id))
+
+        XCTAssertTrue(m.temporaries.isEmpty, "stopping a temporary is what disposes of it")
+        XCTAssertNil(m.states[temp.id], "and its state must not linger as an orphan")
+    }
+
+    @MainActor func testAnErroredTemporaryStaysUntilItIsDismissed() {
+        let m = model()
+        let temp = quickConnect(m)
+        m.handle(HelperMessage(event: "started", id: temp.id))
+        m.handle(HelperMessage(event: "exited", id: temp.id, error: "connection lost"))
+
+        XCTAssertEqual(m.temporaries.count, 1, "removing the row would take the message with it")
+        XCTAssertEqual(m.state(for: temp).run, .error)
+        XCTAssertEqual(m.errored.map(\.id), [temp.id])
+
+        m.dismissError(temp)
+        XCTAssertTrue(m.temporaries.isEmpty, "dismissing is the only way out of an errored temporary")
+        XCTAssertNil(m.states[temp.id])
+    }
+
+    @MainActor func testARunningTemporaryDoesNotBlockAReload() throws {
+        let m = model()
+        m.saveForm(forward(1, name: "mine"))
+        let temp = quickConnect(m)
+        m.handle(HelperMessage(event: "started", id: temp.id))
+
+        let external =
+            #"{"version":1,"forwards":[{"id":9,"instance":"ext","localPort":"1","name":"external","remotePort":"2"}]}"#
+        try Data(external.utf8).write(to: Store.fileURL)
+
+        m.refreshIfChanged()
+
+        XCTAssertEqual(
+            m.forwards.map(\.name), ["external"],
+            "a temporary is never in the file, so it can never be orphaned by a reload")
+        XCTAssertEqual(m.temporaries.count, 1, "and it must survive the reload")
+        XCTAssertNil(m.dataNotice)
+    }
+
+    @MainActor func testTemporaryIDsCannotCollideWithSavedOnes() {
+        let m = model()
+        let first = quickConnect(m, port: "6001")
+        m.handle(HelperMessage(event: "started", id: first.id))
+        let second = quickConnect(m, port: "6002")
+        m.saveForm(forward(1, port: "5432"))
+
+        XCTAssertTrue(first.id < 0, "a negative id is what marks a forward as unsaved")
+        XCTAssertNotEqual(first.id, second.id)
+        XCTAssertEqual(m.forwards.map(\.id), [1], "saved ids carry on from 1 regardless")
+    }
+
+    @MainActor func testATemporaryCarriesNoShortcutOrGroupOfItsOwn() {
+        let m = model()
+        m.beginQuickConnect()
+        var draft = m.editing ?? Forward(id: -1)
+        draft.instance = "db"
+        draft.localPort = "6099"
+        draft.remotePort = "5432"
+        draft.group = "db"
+        draft.hotKey = HotKey(keyCode: 19, carbonModifiers: UInt32(cmdKey | controlKey))
+        m.saveForm(draft)
+
+        XCTAssertEqual(m.temporaries[0].group, ForwardGroup.temporaryName)
+        XCTAssertNil(
+            m.temporaries[0].hotKey,
+            "a shortcut for a row that disposes of itself would outlive the row")
+    }
+
+    @MainActor func testAnInvalidQuickConnectKeepsTheFormOpen() {
+        let m = model()
+        m.beginQuickConnect()
+        var draft = m.editing ?? Forward(id: -1)
+        draft.localPort = "6099"
+        m.saveForm(draft)
+
+        XCTAssertTrue(m.temporaries.isEmpty)
+        XCTAssertTrue(m.showingForm, "the form has to stay up to show what is wrong")
+        XCTAssertNotNil(m.formError)
+    }
+
+    @MainActor func testDeletingATemporaryLeavesTheStoreAlone() {
+        let m = model()
+        m.saveForm(forward(1, name: "mine"))
+        let temp = quickConnect(m)
+
+        m.delete(temp)
+
+        XCTAssertTrue(m.temporaries.isEmpty)
+        XCTAssertEqual(Store.load().forwards.map(\.name), ["mine"])
+        XCTAssertNil(m.states[temp.id])
+    }
+
+    @MainActor func testATemporaryHoldingAPortStopsASavedOneStarting() {
+        let m = model()
+        let temp = quickConnect(m, port: "6099")
+        m.handle(HelperMessage(event: "started", id: temp.id))
+        m.saveForm(forward(1, port: "6099", name: "saved"))
+
+        m.toggle(m.forwards[0])
+
+        XCTAssertEqual(m.state(for: m.forwards[0]).run, .error)
+        XCTAssertTrue(m.state(for: m.forwards[0]).error.contains("6099"))
+    }
+
+    @MainActor func testTestingADraftWaitsForTheHelper() {
+        let m = model()
+        m.beginAdd()
+
+        m.testForm(forward(1))
+
+        XCTAssertEqual(m.testing, 1)
+        XCTAssertNil(m.testOutcome, "no verdict may be shown before one arrives")
+        XCTAssertNil(m.formError)
+    }
+
+    @MainActor func testAPassingTestIsReported() {
+        let m = model()
+        m.testForm(forward(1))
+        m.handle(HelperMessage(event: "test", id: 1, detail: "db (i-0abc) is running"))
+
+        XCTAssertNil(m.testing)
+        XCTAssertEqual(m.testOutcome?.ok, true)
+        XCTAssertEqual(m.testOutcome?.message, "db (i-0abc) is running")
+    }
+
+    @MainActor func testAFailingTestCarriesTheReason() {
+        let m = model()
+        m.testForm(forward(1))
+        m.handle(HelperMessage(event: "test", id: 1, error: "AWS profile \"ghost\" does not exist"))
+
+        XCTAssertNil(m.testing)
+        XCTAssertEqual(m.testOutcome?.ok, false)
+        XCTAssertTrue(m.testOutcome?.message.contains("ghost") ?? false)
+    }
+
+    @MainActor func testAResultForSomethingElseIsIgnored() {
+        let m = model()
+        m.testForm(forward(1))
+        m.handle(HelperMessage(event: "test", id: 2, detail: "another draft"))
+
+        XCTAssertEqual(m.testing, 1, "a reply for another draft must not end this test")
+        XCTAssertNil(m.testOutcome)
+    }
+
+    @MainActor func testALateResultAfterTheFormClosedIsDropped() {
+        let m = model()
+        m.beginAdd()
+        m.testForm(forward(1))
+        m.cancelForm()
+        m.handle(HelperMessage(event: "test", id: 1, detail: "too late"))
+
+        XCTAssertNil(m.testing)
+        XCTAssertNil(m.testOutcome)
+    }
+
+    @MainActor func testTestingAnIncompleteDraftAsksForTheInstanceOnly() {
+        let m = model()
+        var draft = Forward(id: 1)
+        draft.localPort = ""
+        draft.remotePort = ""
+
+        m.testForm(draft)
+
+        XCTAssertNil(m.testing, "there is nothing to look up without an instance")
+        XCTAssertNotNil(m.formError)
+    }
+
+    @MainActor func testALocalPortIsNotNeededToTestATarget() {
+        let m = model()
+        var draft = Forward(id: 1)
+        draft.instance = "db"
+        draft.remotePort = "5432"
+
+        m.testForm(draft)
+
+        XCTAssertEqual(m.testing, 1, "the test opens its own local port, so the field is not needed")
+        XCTAssertNil(m.formError)
+    }
+
+    @MainActor func testTheRemotePortIsNeededToTestATarget() {
+        let m = model()
+        var draft = Forward(id: 1)
+        draft.instance = "db"
+        draft.localPort = "15432"
+
+        m.testForm(draft)
+
+        XCTAssertNil(m.testing, "there is nothing to connect to without a remote port")
+        XCTAssertEqual(m.formError, "Remote port must be a number 1–65535.")
+    }
+
+    @MainActor func testAPortHeldByALiveForwardFailsTheTestWithoutAsking() {
+        let m = model()
+        m.saveForm(forward(1, port: "6099", name: "live"))
+        m.toggle(m.forwards[0])
+        m.handle(HelperMessage(event: "started", id: 1))
+
+        m.testForm(forward(2, port: "6099"))
+
+        XCTAssertNil(m.testing, "the answer is already known here")
+        XCTAssertEqual(m.testOutcome?.ok, false)
+        XCTAssertTrue(m.testOutcome?.message.contains("live") ?? false)
+    }
+
+    @MainActor func testARunningForwardIsTestedWithoutItsOwnLocalPort() {
+        let m = model()
+        m.saveForm(forward(1, port: "15432", name: "live"))
+        let live = m.forwards[0]
+
+        XCTAssertEqual(m.testSpec(for: live).local, "15432")
+
+        m.toggle(live)
+        m.handle(HelperMessage(event: "started", id: 1))
+
+        XCTAssertEqual(
+            m.testSpec(for: live).local, "",
+            "its own listener holds the port; binding it would report a conflict with itself")
+        XCTAssertEqual(m.testSpec(for: live).remote, "5432", "the target is still tested")
+    }
+
+    @MainActor func testAnUnusableLocalPortIsRejectedBeforeTheHelper() {
+        let m = model()
+        var draft = Forward(id: 1)
+        draft.instance = "db"
+        draft.remotePort = "5432"
+        draft.localPort = "not a port"
+
+        m.testForm(draft)
+
+        XCTAssertNil(m.testing)
+        XCTAssertEqual(m.formError, "Local port must be a number 1–65535.")
+    }
+
+    @MainActor func testASecondTestIsNotStartedWhileOneIsRunning() {
+        let m = model()
+        m.testForm(forward(1))
+        m.testForm(forward(2))
+
+        XCTAssertEqual(m.testing, 1)
+    }
+
+    @MainActor func testOpeningTheFormClearsAnOlderVerdict() {
+        let m = model()
+        m.testForm(forward(1))
+        m.handle(HelperMessage(event: "test", id: 1, detail: "worked"))
+
+        m.beginEdit(forward(1))
+        XCTAssertNil(m.testOutcome, "a verdict about the last draft would read as this one's")
+
+        m.testForm(forward(1))
+        m.handle(HelperMessage(event: "test", id: 1, detail: "worked"))
+        m.saveForm(forward(1))
+        XCTAssertNil(m.testOutcome)
     }
 }
 

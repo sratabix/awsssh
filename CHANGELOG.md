@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.0.3
+
+- Test a forward from the form before saving it. It opens the tunnel and connects to the target.
+- Quick connect starts a forward without saving it. It runs until you stop it.
+- Long names are no longer covered by a scroll bar when macOS is set to always show them.
+- Automatic sign-in waits for DNS to answer, not just for a network.
+- A long sign-in error wraps instead of being cut off.
+- The list can no longer be dragged sideways, and a name only scrolls when it is cut off.
+
 ## v1.0.1
 
 - Add automatic sso sign-in, in its own window instead of a browser.

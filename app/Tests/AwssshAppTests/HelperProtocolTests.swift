@@ -285,6 +285,35 @@ final class HelperProtocolTests: XCTestCase {
         XCTAssertFalse(SSOLogin(login).scoped)
     }
 
+    func testATestCommandLooksLikeAStartWithADifferentName() throws {
+        let object = try encode(
+            HelperCommand(
+                cmd: "test",
+                id: -1,
+                forward: HelperForward(
+                    profile: "dev", region: "eu-west-1", instance: "db",
+                    local: "15432", host: "", remote: "5432"))
+        )
+
+        XCTAssertEqual(object["cmd"] as? String, "test")
+        XCTAssertEqual(object["id"] as? Int, -1, "a quick-connect draft is tested by its negative id")
+        let forward = try XCTUnwrap(object["forward"] as? [String: Any])
+        XCTAssertEqual(
+            Set(forward.keys), ["profile", "region", "instance", "local", "host", "remote"],
+            "the helper decodes one forwardSpec for both commands")
+    }
+
+    func testATestResultDecodesBothWays() throws {
+        let passed = try decode(#"{"event":"test","id":3,"detail":"db (i-0abc) is running"}"#)
+        XCTAssertEqual(passed.event, "test")
+        XCTAssertEqual(passed.id, 3)
+        XCTAssertNil(passed.error)
+
+        let failed = try decode(#"{"event":"test","id":3,"error":"no instance matched \"db\""}"#)
+        XCTAssertEqual(failed.error, "no instance matched \"db\"")
+        XCTAssertNil(failed.detail, "a failure carries no summary")
+    }
+
     func testAPendingSignInNamesTheLoginItIsWaitingOn() throws {
         let message = try decode(#"{"event":"ssoLoginPending","detail":"company"}"#)
 

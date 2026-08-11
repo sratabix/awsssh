@@ -18,7 +18,7 @@ struct SignInRow: View {
                 }
             }
             if let err = model.signInError {
-                Text(err).font(.caption).foregroundStyle(.orange)
+                NoticeText(err)
             }
         }
     }

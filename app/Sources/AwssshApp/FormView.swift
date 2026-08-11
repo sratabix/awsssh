@@ -7,9 +7,13 @@ struct FormView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            if draft.isTemporary {
+                Text("Runs until you stop it. Nothing is saved.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: 6) {
                 field("Name", text: $draft.name, placeholder: "postgres (optional)")
-                groupField
+                if !draft.isTemporary { groupField }
                 profileField
                 field("Region", text: $draft.region, placeholder: "eu-central-1 (optional)")
                 field("Instance", text: $draft.instance, placeholder: "db-prod (Name tag or ID)")
@@ -17,20 +21,48 @@ struct FormView: View {
                 field("Remote host", text: $draft.host, placeholder: "db.internal (optional)")
                 field("Remote port", text: $draft.remotePort, placeholder: "5432")
                 colorField
-                hotKeyField
+                if !draft.isTemporary { hotKeyField }
             }
             if let err = model.formError {
-                Text(err).font(.caption).foregroundStyle(.red)
+                note(err, tint: .red)
             }
+            testLine
             Divider()
             HStack {
                 Button("Cancel") { model.cancelForm() }
                     .keyboardShortcut(.cancelAction)
+                Button("Test") { model.testForm(draft) }
+                    .disabled(model.testing != nil)
+                    .help("Check the profile, the instance and its SSM agent without connecting")
                 Spacer()
-                Button("Save") { model.saveForm(draft) }.keyboardShortcut(.defaultAction)
+                Button(draft.isTemporary ? "Connect" : "Save") { model.saveForm(draft) }
+                    .keyboardShortcut(.defaultAction)
             }
         }
         .onAppear { hexText = draft.color }
+    }
+
+    @ViewBuilder private var testLine: some View {
+        if model.testing != nil {
+            HStack(spacing: 5) {
+                ProgressView().controlSize(.small)
+                Text("Testing…").font(.caption).foregroundStyle(.secondary)
+            }
+        } else if let outcome = model.testOutcome {
+            HStack(alignment: .top, spacing: 5) {
+                Image(systemName: outcome.ok ? "checkmark.circle.fill" : "xmark.circle.fill")
+                    .foregroundStyle(outcome.ok ? .green : .red)
+                note(outcome.message, tint: outcome.ok ? .secondary : .red)
+            }
+        }
+    }
+
+    private func note(_ text: String, tint: Color) -> some View {
+        Text(text)
+            .font(.caption)
+            .foregroundStyle(tint)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func field(_ label: String, text: Binding<String>, placeholder: String) -> some View {

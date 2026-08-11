@@ -485,6 +485,112 @@ func TestLoginsReportAnUnscopedSession(t *testing.T) {
 	}
 }
 
+func TestLoginsCarryTheStartURL(t *testing.T) {
+	stubLogins(t, sharedSession(), nil)
+
+	m, ok := firstWithEvent(runServe(t, `{"cmd":"logins"}`+"\n"), "logins")
+	if !ok {
+		t.Fatal("no logins message")
+	}
+	if m.Logins[0].StartURL != "https://example.awsapps.com/start" {
+		t.Errorf("StartURL = %q, the app resolves its host before an automatic sign-in", m.Logins[0].StartURL)
+	}
+}
+
+func stubCheck(t *testing.T, run func(forward.Spec) (string, error)) {
+	t.Helper()
+	previous := checkForward
+	checkForward = func(_ context.Context, _ *forward.Manager, s forward.Spec) (string, error) {
+		return run(s)
+	}
+	t.Cleanup(func() { checkForward = previous })
+}
+
+const testCommand = `{"cmd":"test","id":6,"forward":{"profile":"prod","region":"eu-central-1",` +
+	`"instance":"db","local":"5432","host":"","remote":"5432"}}` + "\n"
+
+func TestATestReportsWhatItFound(t *testing.T) {
+	var got forward.Spec
+	stubCheck(t, func(s forward.Spec) (string, error) {
+		got = s
+		return "db (i-0abc) is running in eu-central-1 and its SSM agent is online", nil
+	})
+
+	m, ok := firstWithEvent(runServe(t, testCommand), "test")
+	if !ok {
+		t.Fatal("no test message")
+	}
+	if m.ID != 6 {
+		t.Errorf("ID = %d, want 6 so a stale reply can be dropped", m.ID)
+	}
+	if m.Error != "" {
+		t.Errorf("Error = %q, want none", m.Error)
+	}
+	if !strings.Contains(m.Detail, "SSM agent is online") {
+		t.Errorf("Detail = %q, want the summary", m.Detail)
+	}
+	if got.Profile != "prod" || got.Instance != "db" || got.Region != "eu-central-1" {
+		t.Errorf("spec = %+v, want the draft the app sent", got)
+	}
+}
+
+func TestATestReportsAFailure(t *testing.T) {
+	stubCheck(t, func(forward.Spec) (string, error) {
+		return "", errors.New("not signed in to AWS profile \"prod\"")
+	})
+
+	m, ok := firstWithEvent(runServe(t, testCommand), "test")
+	if !ok {
+		t.Fatal("no test message")
+	}
+	if !strings.Contains(m.Error, "not signed in") {
+		t.Errorf("Error = %q, want the reason", m.Error)
+	}
+	if m.Detail != "" {
+		t.Errorf("Detail = %q, want nothing beside a failure", m.Detail)
+	}
+}
+
+func TestATestWithoutASpecIsRejectedAgainstItsID(t *testing.T) {
+	m, ok := firstWithEvent(runServe(t, `{"cmd":"test","id":9}`+"\n"), "test")
+	if !ok {
+		t.Fatal("no test message")
+	}
+	if m.ID != 9 || !strings.Contains(m.Error, "missing forward spec") {
+		t.Errorf("got %+v, want a complaint against id 9", m)
+	}
+}
+
+func TestATestThatNeverAnswersGivesUp(t *testing.T) {
+	previous := checkTimeout
+	checkTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { checkTimeout = previous })
+
+	stubCheck(t, func(forward.Spec) (string, error) {
+		time.Sleep(80 * time.Millisecond)
+		return "", context.DeadlineExceeded
+	})
+
+	m, ok := firstWithEvent(runServe(t, testCommand), "test")
+	if !ok {
+		t.Fatal("no test message; a form waiting for one would spin for ever")
+	}
+	if !strings.Contains(m.Error, "gave up") {
+		t.Errorf("Error = %q, want a timeout the user can read", m.Error)
+	}
+}
+
+func TestServeWaitsForATestBeforeShuttingDown(t *testing.T) {
+	stubCheck(t, func(forward.Spec) (string, error) {
+		time.Sleep(20 * time.Millisecond)
+		return "fine", nil
+	})
+
+	if _, ok := firstWithEvent(runServe(t, testCommand), "test"); !ok {
+		t.Error("stdin EOF must not drop a test that is still running")
+	}
+}
+
 func TestTheAuthorizeURLIsForwardedToTheApp(t *testing.T) {
 	const want = "https://oidc.eu-central-1.amazonaws.com/authorize?x=1"
 	stubLogins(t, sharedSession(), func(_ context.Context, req awsx.LoginRequest) error {

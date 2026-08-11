@@ -9,11 +9,14 @@ final class AppModel: ObservableObject {
     static let autoSignInBackoff: TimeInterval = 900
 
     @Published var forwards: [Forward] = []
+    @Published private(set) var temporaries: [Forward] = []
     @Published var states: [Int: EntryState] = [:]
     @Published var profiles: [String] = []
     @Published var editing: Forward?
     @Published var showingForm = false
     @Published var formError: String?
+    @Published var testing: Int?
+    @Published var testOutcome: TestOutcome?
     @Published var pendingDelete: Forward?
     @Published var launchAtLogin = LaunchAtLogin.isEnabled
     @Published var launchAtLoginError: String?
@@ -52,10 +55,12 @@ final class AppModel: ObservableObject {
     private let webWindow = WebSignInWindowPresenter()
     private let attached: Bool
     private var nextID = 1
+    private var nextTemporaryID = -1
     private var stamp: Date?
     private var awaitingRestart: Set<Int> = []
     private var wakeObserver: NSObjectProtocol?
     let network = NetworkMonitor()
+    let dns = DNSCheck()
     let screen = ScreenLock()
     let presentation = Presentation()
     let webSignIn = WebSignIn()
@@ -102,12 +107,16 @@ final class AppModel: ObservableObject {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
+                self?.dns.invalidate()
                 self?.refreshLogins()
                 self?.reconnectLiveForwards(reason: .sleep)
             }
         }
 
+        dns.onResolve = { [weak self] in self?.maybeAutoSignIn() }
+
         network.onChange = { [weak self] in
+            self?.dns.invalidate()
             self?.reconnectLiveForwards(reason: .network)
             self?.maybeAutoSignIn()
         }
@@ -160,8 +169,12 @@ final class AppModel: ObservableObject {
         logins.filter { !$0.signedIn(at: now, check: check(for: $0)) }
     }
 
+    var signInHost: String {
+        logins.first(where: { !$0.host.isEmpty })?.host ?? DNSCheck.fallbackHost
+    }
+
     var deferAutoSignIn: Bool {
-        !network.reachable || screen.locked || presentation.active
+        !network.reachable || screen.locked || presentation.active || !dns.resolves(signInHost)
     }
 
     func maybeAutoSignIn(now: Date = Date()) {
@@ -174,7 +187,9 @@ final class AppModel: ObservableObject {
             }
         }
 
-        guard autoSignIn, showSSO, signingIn == nil, !deferAutoSignIn else { return }
+        guard autoSignIn, showSSO, signingIn == nil, !expired.isEmpty else { return }
+        dns.confirm(signInHost)
+        guard !deferAutoSignIn else { return }
 
         for login in expired {
             if let last = lastAutoSignIn[login.label],
@@ -198,10 +213,12 @@ final class AppModel: ObservableObject {
         launchAtLogin = LaunchAtLogin.isEnabled
     }
 
+    var entries: [Forward] { temporaries + forwards }
+
     var runningCount: Int { states.values.filter { $0.run == .running }.count }
 
     var needsAttention: Bool {
-        let live = Set(forwards.map(\.id))
+        let live = Set(entries.map(\.id))
         return states.contains { id, state in
             live.contains(id) && (state.run == .reconnecting || state.run == .error)
         }
@@ -221,9 +238,10 @@ final class AppModel: ObservableObject {
             $0.error = ""
             $0.since = nil
         }
+        forget(forward.id)
     }
 
-    var errored: [Forward] { forwards.filter { state(for: $0).run == .error } }
+    var errored: [Forward] { entries.filter { state(for: $0).run == .error } }
 
     func dismissErrors(_ list: [Forward]) {
         for forward in list { dismissError(forward) }
@@ -249,6 +267,7 @@ final class AppModel: ObservableObject {
             importError = nil
             pendingDelete = nil
             formError = nil
+            resetTest()
             editing = Share.forward(from: payload, id: nextID)
             showingForm = true
         } catch {
@@ -327,7 +346,7 @@ final class AppModel: ObservableObject {
         if attached { webSignIn.reset() }
     }
 
-    var groups: [ForwardGroup] { ForwardGroup.build(from: forwards) }
+    var groups: [ForwardGroup] { ForwardGroup.build(from: entries) }
 
     var groupNames: [String] { ForwardGroup.names(in: forwards) }
 
@@ -414,25 +433,55 @@ final class AppModel: ObservableObject {
     }
 
     private func sendStart(_ forward: Forward) {
-        helper.send(
-            HelperCommand(
-                cmd: "start",
-                id: forward.id,
-                forward: HelperForward(
-                    profile: forward.profile,
-                    region: forward.region,
-                    instance: forward.instance,
-                    local: forward.localPort,
-                    host: forward.host,
-                    remote: forward.remotePort
-                )
-            ))
+        helper.send(HelperCommand(cmd: "start", id: forward.id, forward: Self.spec(for: forward)))
+    }
+
+    private static func spec(for forward: Forward) -> HelperForward {
+        HelperForward(
+            profile: forward.profile,
+            region: forward.region,
+            instance: forward.instance,
+            local: forward.localPort,
+            host: forward.host,
+            remote: forward.remotePort
+        )
+    }
+
+    func testForm(_ draft: Forward) {
+        guard testing == nil else { return }
+        if let err = draft.validateTarget() ?? draft.validateLocalIfGiven() {
+            formError = err
+            testOutcome = nil
+            return
+        }
+        formError = nil
+        if let other = liveForward(onLocalPort: draft.localPort, excluding: draft.id) {
+            testOutcome = TestOutcome(
+                ok: false,
+                message: "local port \(draft.localPort) is already in use by “\(other.title)”")
+            return
+        }
+        testOutcome = nil
+        testing = draft.id
+
+        helper.send(HelperCommand(cmd: "test", id: draft.id, forward: testSpec(for: draft)))
+    }
+
+    func testSpec(for draft: Forward) -> HelperForward {
+        var spec = Self.spec(for: draft)
+        if isLive(state(for: draft).run) { spec.local = "" }
+        return spec
+    }
+
+    private func resetTest() {
+        testing = nil
+        testOutcome = nil
     }
 
     func reconnectLiveForwards(reason: ReconnectReason, now: Date = Date()) {
         if let lastReconnect, now.timeIntervalSince(lastReconnect) < Self.reconnectCooldown { return }
 
-        let live = forwards.filter { state(for: $0).run == .running }
+        let live = entries.filter { state(for: $0).run == .running }
         guard !live.isEmpty else { return }
         lastReconnect = now
 
@@ -452,6 +501,17 @@ final class AppModel: ObservableObject {
         pendingDelete = nil
         editing = Forward(id: nextID)
         formError = nil
+        resetTest()
+        showingForm = true
+    }
+
+    func beginQuickConnect() {
+        pendingDelete = nil
+        var draft = Forward(id: nextTemporaryID)
+        draft.group = ForwardGroup.temporaryName
+        editing = draft
+        formError = nil
+        resetTest()
         showingForm = true
     }
 
@@ -459,6 +519,7 @@ final class AppModel: ObservableObject {
         pendingDelete = nil
         editing = forward
         formError = nil
+        resetTest()
         showingForm = true
     }
 
@@ -467,12 +528,16 @@ final class AppModel: ObservableObject {
         forward.color = ForwardColor.normalise(forward.color)
         forward.group = forward.group.trimmingCharacters(in: .whitespaces)
 
+        if forward.isTemporary {
+            connect(forward)
+            return
+        }
         if let err = forward.validate() {
             formError = err
             return
         }
         if let hotKey = forward.hotKey,
-            let clash = HotKeyCenter.conflict(for: hotKey, in: forwards, excluding: forward.id)
+            let clash = HotKeyCenter.conflict(for: hotKey, in: entries, excluding: forward.id)
         {
             formError = "\(hotKey.displayString) is already used by “\(clash.title)”."
             return
@@ -487,12 +552,39 @@ final class AppModel: ObservableObject {
         syncHotKeys()
         showingForm = false
         editing = nil
+        resetTest()
+    }
+
+    private func connect(_ draft: Forward) {
+        var forward = draft
+        forward.group = ForwardGroup.temporaryName
+        forward.hotKey = nil
+
+        if let err = forward.validate() {
+            formError = err
+            return
+        }
+
+        temporaries.append(forward)
+        nextTemporaryID -= 1
+        showingForm = false
+        editing = nil
+        resetTest()
+        toggle(forward)
+    }
+
+    private func forget(_ id: Int) {
+        guard id < 0 else { return }
+        temporaries.removeAll { $0.id == id }
+        states[id] = nil
+        if expandedError == id { expandedError = nil }
     }
 
     func cancelForm() {
         showingForm = false
         editing = nil
         formError = nil
+        resetTest()
     }
 
     func confirmDelete(_ forward: Forward) {
@@ -506,6 +598,11 @@ final class AppModel: ObservableObject {
     func delete(_ forward: Forward) {
         awaitingRestart.remove(forward.id)
         helper.send(HelperCommand(cmd: "stop", id: forward.id))
+        if forward.isTemporary {
+            forget(forward.id)
+            pendingDelete = nil
+            return
+        }
         forwards.removeAll { $0.id == forward.id }
         states[forward.id] = nil
         if expandedError == forward.id { expandedError = nil }
@@ -530,7 +627,7 @@ final class AppModel: ObservableObject {
         guard let onDisk = Store.stamp(), onDisk != stamp else { return }
 
         let loaded = Store.load()
-        let running = Set(states.filter { $0.value.run != .stopped }.keys)
+        let running = Set(states.filter { $0.value.run != .stopped && $0.key > 0 }.keys)
         guard running.isSubset(of: Set(loaded.forwards.map(\.id))) else {
             dataNotice = "forwards.json changed on disk; not reloading while forwards are running."
             return
@@ -548,7 +645,7 @@ final class AppModel: ObservableObject {
     }
 
     func liveForward(onLocalPort localPort: String, excluding id: Int) -> Forward? {
-        forwards.first { f in
+        entries.first { f in
             guard f.id != id, f.localPort == localPort else { return false }
             switch state(for: f).run {
             case .starting, .running, .reconnecting, .stopping: return true
@@ -579,9 +676,13 @@ final class AppModel: ObservableObject {
         case "exited":
             if let id = msg.id {
                 if awaitingRestart.remove(id) != nil,
-                    let forward = forwards.first(where: { $0.id == id })
+                    let forward = entries.first(where: { $0.id == id })
                 {
                     sendStart(forward)
+                    return
+                }
+                if id < 0, !temporaries.contains(where: { $0.id == id }) {
+                    states[id] = nil
                     return
                 }
                 let requested = states[id]?.run == .stopping
@@ -602,7 +703,16 @@ final class AppModel: ObservableObject {
                         $0.error = ""
                         $0.since = nil
                     }
+                    forget(id)
                 }
+            }
+        case "test":
+            guard let id = msg.id, testing == id else { break }
+            testing = nil
+            if let e = msg.error, !e.isEmpty {
+                testOutcome = TestOutcome(ok: false, message: e)
+            } else {
+                testOutcome = TestOutcome(ok: true, message: msg.detail ?? "the connection works")
             }
         case "profiles":
             profiles = msg.profiles ?? []

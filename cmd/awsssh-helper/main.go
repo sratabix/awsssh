@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/signal"
@@ -31,9 +33,21 @@ type forwardSpec struct {
 	RemotePort string `json:"remote"`
 }
 
+func (f forwardSpec) spec() forward.Spec {
+	return forward.Spec{
+		Profile:    f.Profile,
+		Region:     f.Region,
+		Instance:   f.Instance,
+		LocalPort:  f.LocalPort,
+		Host:       f.Host,
+		RemotePort: f.RemotePort,
+	}
+}
+
 type loginInfo struct {
 	Label       string   `json:"label"`
 	Profiles    []string `json:"profiles"`
+	StartURL    string   `json:"startUrl,omitempty"`
 	Expires     string   `json:"expires,omitempty"`
 	Refreshable bool     `json:"refreshable,omitempty"`
 	Scoped      bool     `json:"scoped,omitempty"`
@@ -122,14 +136,18 @@ func handle(
 			out.send(message{Event: string(forward.Exited), ID: c.ID, Error: "missing forward spec"})
 			return
 		}
-		mgr.Start(c.ID, forward.Spec{
-			Profile:    c.Forward.Profile,
-			Region:     c.Forward.Region,
-			Instance:   c.Forward.Instance,
-			LocalPort:  c.Forward.LocalPort,
-			Host:       c.Forward.Host,
-			RemotePort: c.Forward.RemotePort,
-		})
+		mgr.Start(c.ID, c.Forward.spec())
+	case "test":
+		if c.Forward == nil {
+			out.send(message{Event: "test", ID: c.ID, Error: "missing forward spec"})
+			return
+		}
+		spec := c.Forward.spec()
+		background.Add(1)
+		go func() {
+			defer background.Done()
+			runCheck(ctx, c.ID, spec, mgr, out)
+		}()
 	case "stop":
 		mgr.Stop(c.ID)
 	case "stopAll":
@@ -160,7 +178,31 @@ var (
 	ssoLogin     = awsx.RunSSOLogin
 	loginChecker = awsx.CheckLogin
 	signInGrace  = 12 * time.Second
+	checkTimeout = 45 * time.Second
+
+	checkForward = func(ctx context.Context, mgr *forward.Manager, s forward.Spec) (string, error) {
+		return mgr.Check(ctx, s)
+	}
 )
+
+func runCheck(ctx context.Context, id int, s forward.Spec, mgr *forward.Manager, out *output) {
+	ctx, cancel := context.WithTimeout(ctx, checkTimeout)
+	defer cancel()
+
+	detail, err := checkForward(ctx, mgr, s)
+	m := message{Event: "test", ID: id}
+	switch {
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		m.Error = fmt.Sprintf("the test gave up after %s with no answer from AWS", checkTimeout)
+	case errors.Is(err, context.Canceled):
+		return
+	case err != nil:
+		m.Error = err.Error()
+	default:
+		m.Detail = detail
+	}
+	out.send(m)
+}
 
 func checkLogin(ctx context.Context, label string, out *output) {
 	for _, login := range listLogins() {
@@ -183,6 +225,7 @@ func loginList() message {
 		info := loginInfo{
 			Label:       login.Label(),
 			Profiles:    login.Profiles,
+			StartURL:    login.StartURL,
 			Refreshable: login.Refreshable,
 			Scoped:      login.Scoped,
 		}
