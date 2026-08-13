@@ -43,10 +43,8 @@ struct WhatsNewView: View {
     }
 
     private var title: String {
-        guard let first = model.whatsNew.first else { return "What's new" }
-        return model.whatsNew.count == 1
-            ? "What's new in \(first.displayVersion)"
-            : "What's new since \(model.whatsNew.last?.displayVersion ?? first.displayVersion)"
+        guard let first = model.whatsNew.first, model.whatsNew.count == 1 else { return "What's new" }
+        return "What's new in \(first.displayVersion)"
     }
 }
 

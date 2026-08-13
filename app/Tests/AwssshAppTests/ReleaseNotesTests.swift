@@ -81,19 +81,22 @@ final class ReleaseNotesTests: XCTestCase {
         XCTAssertTrue(ReleaseNotes.forUpdate(from: "1.0.0", to: "0.0.9", in: changelog).isEmpty)
     }
 
-    func testForCurrentPrefersTheExactVersion() {
-        XCTAssertEqual(ReleaseNotes.forCurrent("0.0.9", in: changelog).map(\.version), ["0.0.9"])
+    func testTheHistoryStopsAtTheRunningVersion() {
+        XCTAssertEqual(
+            ReleaseNotes.history(upTo: "0.0.9", in: changelog).map(\.version), ["0.0.9", "0.0.8"],
+            "a changelog committed ahead of the release must not leak unreleased notes")
     }
 
-    func testForCurrentFallsBackToTheNewestSection() {
+    func testTheHistoryFallsBackToEverythingForABuildOlderThanEverySection() {
         XCTAssertEqual(
-            ReleaseNotes.forCurrent("0.0.0-dev", in: changelog).map(\.version), ["1.0.0"],
+            ReleaseNotes.history(upTo: "0.0.0-dev", in: changelog).map(\.version),
+            ["1.0.0", "0.0.9", "0.0.8"],
             "a dev build has no section of its own but must still render something")
     }
 
     func testAnEmptyChangelogYieldsNothingRatherThanCrashing() {
         XCTAssertTrue(ReleaseNotes.parse("").isEmpty)
-        XCTAssertTrue(ReleaseNotes.forCurrent("1.0.0", in: "").isEmpty)
+        XCTAssertTrue(ReleaseNotes.history(upTo: "1.0.0", in: "").isEmpty)
         XCTAssertTrue(ReleaseNotes.forUpdate(from: "0.9.0", to: "1.0.0", in: "").isEmpty)
     }
 

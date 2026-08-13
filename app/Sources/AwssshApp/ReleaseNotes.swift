@@ -59,10 +59,10 @@ struct ReleaseNotes {
         }
     }
 
-    static func forCurrent(_ current: String, in text: String) -> [Section] {
+    static func history(upTo current: String, in text: String) -> [Section] {
         let all = parse(text)
-        if let exact = all.first(where: { $0.version == current }) { return [exact] }
-        return Array(all.prefix(1))
+        let released = all.filter { !UpdateChecker.isNewer(remote: $0.version, current: current) }
+        return released.isEmpty ? all : released
     }
 
     static func bundled() -> String {

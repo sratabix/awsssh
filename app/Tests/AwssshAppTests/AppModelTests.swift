@@ -600,24 +600,44 @@ final class AppModelTests: XCTestCase {
         m.announceUpdate(current: "1.0.0", notes: notes)
 
         XCTAssertFalse(
-            m.showingWhatsNew,
+            m.whatsNewUnread,
             "a fresh install has nothing new to be told about")
+        XCTAssertFalse(m.showingWhatsNew)
         XCTAssertEqual(Preferences.lastSeenVersion, "1.0.0")
     }
 
-    @MainActor func testAnUpdateAnnouncesItselfOnce() {
+    @MainActor func testAnUpdateBadgesTheVersionInsteadOfOpeningAWindow() {
         Preferences.lastSeenVersion = "0.9.0"
         let m = model()
 
         m.announceUpdate(current: "1.0.0", notes: notes)
-        XCTAssertTrue(m.showingWhatsNew)
-        XCTAssertEqual(m.whatsNew.map(\.version), ["1.0.0"])
+        XCTAssertTrue(m.whatsNewUnread)
+        XCTAssertFalse(m.showingWhatsNew, "nothing may open itself over what the user is doing")
+        XCTAssertEqual(
+            Preferences.lastSeenVersion, "0.9.0",
+            "recording it now would drop the badge on the next launch, unread")
+    }
 
-        m.closeWhatsNew()
-        m.announceUpdate(current: "1.0.0", notes: notes)
-        XCTAssertFalse(
-            m.showingWhatsNew,
-            "the version is recorded on the first announce, so a relaunch stays quiet")
+    @MainActor func testTheBadgeSurvivesARelaunchUntilItIsOpened() {
+        Preferences.lastSeenVersion = "0.9.0"
+        let first = model()
+        first.announceUpdate(current: "1.0.0", notes: notes)
+
+        let relaunched = model()
+        relaunched.announceUpdate(current: "1.0.0", notes: notes)
+        XCTAssertTrue(relaunched.whatsNewUnread, "unseen is unseen, however often the app starts")
+
+        relaunched.openWhatsNew(current: "1.0.0", notes: notes)
+        XCTAssertTrue(relaunched.showingWhatsNew)
+        XCTAssertFalse(relaunched.whatsNewUnread)
+        XCTAssertEqual(
+            relaunched.whatsNew.map(\.version), ["1.0.0", "0.9.0"],
+            "the window is the whole changelog, so nothing skipped can be missed")
+        XCTAssertEqual(Preferences.lastSeenVersion, "1.0.0")
+
+        let after = model()
+        after.announceUpdate(current: "1.0.0", notes: notes)
+        XCTAssertFalse(after.whatsNewUnread, "reading it is what records it")
     }
 
     @MainActor func testTheSameVersionNeverAnnounces() {
@@ -625,6 +645,7 @@ final class AppModelTests: XCTestCase {
         let m = model()
         m.announceUpdate(current: "1.0.0", notes: notes)
 
+        XCTAssertFalse(m.whatsNewUnread)
         XCTAssertFalse(m.showingWhatsNew)
     }
 
@@ -634,7 +655,7 @@ final class AppModelTests: XCTestCase {
         m.announceUpdate(current: "1.0.1", notes: notes)
 
         XCTAssertFalse(
-            m.showingWhatsNew,
+            m.whatsNewUnread,
             "an empty window is worse than none")
         XCTAssertEqual(
             Preferences.lastSeenVersion, "1.0.1",
@@ -647,7 +668,7 @@ final class AppModelTests: XCTestCase {
 
         m.announceUpdate(current: "0.0.0-dev", notes: notes)
 
-        XCTAssertFalse(m.showingWhatsNew)
+        XCTAssertFalse(m.whatsNewUnread)
         XCTAssertEqual(
             Preferences.lastSeenVersion, "1.0.2",
             "a local build must not touch the record the installed app keeps")
@@ -660,7 +681,7 @@ final class AppModelTests: XCTestCase {
         m.announceUpdate(current: "1.0.0", notes: notes)
 
         XCTAssertFalse(
-            m.showingWhatsNew,
+            m.whatsNewUnread,
             "0.0.0 reads as older than every release, which dumped every section ever written")
         XCTAssertEqual(Preferences.lastSeenVersion, "1.0.0")
     }
@@ -671,30 +692,34 @@ final class AppModelTests: XCTestCase {
 
         m.announceUpdate(current: "0.9.0", notes: notes)
 
-        XCTAssertFalse(m.showingWhatsNew, "an older build has nothing new to announce")
+        XCTAssertFalse(m.whatsNewUnread, "an older build has nothing new to announce")
         XCTAssertEqual(
             Preferences.lastSeenVersion, "1.0.1",
             "rewinding it would replay the notes on the way back up")
     }
 
-    @MainActor func testAJumpOfSeveralVersionsStillShowsEveryReleaseBetween() {
+    @MainActor func testAJumpOfSeveralVersionsStillBadgesTheVersion() {
         Preferences.lastSeenVersion = "0.8.0"
         let m = model()
 
         m.announceUpdate(current: "1.0.1", notes: notes)
 
-        XCTAssertTrue(m.showingWhatsNew)
-        XCTAssertEqual(
-            m.whatsNew.map(\.version), ["1.0.0", "0.9.0"],
-            "skipping releases is normal; every section since the last one seen belongs here")
+        XCTAssertTrue(m.whatsNewUnread, "skipping releases is normal and still worth a badge")
     }
 
-    @MainActor func testWhatsNewCanBeOpenedByHand() {
+    @MainActor func testWhatsNewListsEveryReleaseUpToTheRunningOne() {
         let m = model()
         m.openWhatsNew(current: "0.9.0", notes: notes)
 
         XCTAssertTrue(m.showingWhatsNew)
-        XCTAssertEqual(m.whatsNew.map(\.version), ["0.9.0"])
+        XCTAssertEqual(
+            m.whatsNew.map(\.version), ["0.9.0"],
+            "a changelog committed ahead of the release must not leak unreleased notes")
+
+        m.openWhatsNew(current: "1.0.0", notes: notes)
+        XCTAssertEqual(
+            m.whatsNew.map(\.version), ["1.0.0", "0.9.0"],
+            "reading only the newest section is how a skipped feature goes unnoticed")
     }
 
     @MainActor func testAManualSignInShowsItsWindowAtOnce() {
@@ -1613,6 +1638,32 @@ final class AppModelTests: XCTestCase {
 
         m.importShared(#"{"instance":"theirs","localPort":"1","remotePort":"2"}"#)
         XCTAssertNil(m.importError)
+    }
+
+    @MainActor func testPastingIntoAQuickConnectKeepsItTemporary() {
+        let m = model()
+        m.beginQuickConnect()
+        let draft = try? XCTUnwrap(m.editing)
+
+        let merged = m.merge(
+            #"{"version":1,"forward":{"instance":"theirs","localPort":"6000",""#
+                + #"remotePort":"5432","group":"databases"}}"#, into: draft!)
+
+        XCTAssertEqual(merged?.id, draft?.id, "a paste fills the draft, it does not replace it")
+        XCTAssertTrue(merged?.isTemporary ?? false)
+        XCTAssertEqual(merged?.group, ForwardGroup.temporaryName, "the sender's group must not stick")
+        XCTAssertEqual(merged?.instance, "theirs")
+        XCTAssertEqual(merged?.localPort, "6000")
+        XCTAssertNil(m.formError)
+    }
+
+    @MainActor func testAFailedPasteComplainsAndLeavesTheDraftAlone() {
+        let m = model()
+        m.beginQuickConnect()
+
+        XCTAssertNil(m.merge("this is not json", into: m.editing!))
+        XCTAssertNotNil(m.formError)
+        XCTAssertTrue(m.showingForm, "the form stays open with what the user typed")
     }
 
     @MainActor func testSharingProducesImportableText() {

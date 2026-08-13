@@ -30,6 +30,7 @@ final class AppModel: ObservableObject {
     @Published var signInPending = false
     @Published var showingSettings = false
     @Published var showingWhatsNew = false
+    @Published private(set) var whatsNewUnread = false
     @Published var showingWebSignIn = false
     @Published private(set) var whatsNew: [ReleaseNotes.Section] = []
     @Published var showSSO = Preferences.showSSO {
@@ -261,6 +262,25 @@ final class AppModel: ObservableObject {
         importShared(NSPasteboard.general.string(forType: .string) ?? "")
     }
 
+    func pasteIntoForm(_ draft: Forward) -> Forward? {
+        merge(NSPasteboard.general.string(forType: .string) ?? "", into: draft)
+    }
+
+    func merge(_ text: String, into draft: Forward) -> Forward? {
+        do {
+            let payload = try Share.decode(text)
+            formError = nil
+            resetTest()
+            var merged = Share.forward(from: payload, id: draft.id)
+            merged.group = draft.group
+            merged.hotKey = draft.hotKey
+            return merged
+        } catch {
+            formError = error.localizedDescription
+            return nil
+        }
+    }
+
     func importShared(_ text: String) {
         do {
             let payload = try Share.decode(text)
@@ -288,19 +308,32 @@ final class AppModel: ObservableObject {
 
         let seen = Preferences.lastSeenVersion
         let moved = seen.isEmpty || UpdateChecker.isNewer(remote: current, current: seen)
-        if moved { Preferences.lastSeenVersion = current }
+        guard moved else { return }
 
-        guard moved, !seen.isEmpty, AppInfo.isRelease(seen) else { return }
-
-        let sections = ReleaseNotes.forUpdate(from: seen, to: current, in: notes)
-        guard !sections.isEmpty else { return }
-        whatsNew = sections
-        showingWhatsNew = true
+        let sections =
+            seen.isEmpty || !AppInfo.isRelease(seen)
+            ? [] : ReleaseNotes.forUpdate(from: seen, to: current, in: notes)
+        guard !sections.isEmpty else {
+            Preferences.lastSeenVersion = current
+            return
+        }
+        whatsNewUnread = true
     }
 
     func openWhatsNew(current: String = AppInfo.version, notes: String = ReleaseNotes.bundled()) {
-        whatsNew = ReleaseNotes.forCurrent(current, in: notes)
+        whatsNew = ReleaseNotes.history(upTo: current, in: notes)
+        markUpdateSeen(current)
         showingWhatsNew = true
+    }
+
+    private func markUpdateSeen(_ current: String) {
+        whatsNewUnread = false
+        guard AppInfo.isRelease(current) else { return }
+
+        let seen = Preferences.lastSeenVersion
+        if seen.isEmpty || UpdateChecker.isNewer(remote: current, current: seen) {
+            Preferences.lastSeenVersion = current
+        }
     }
 
     func closeWhatsNew() {

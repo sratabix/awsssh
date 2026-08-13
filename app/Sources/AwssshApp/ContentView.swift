@@ -23,15 +23,28 @@ struct ContentView: View {
             HStack(spacing: 6) {
                 Text("Port forwards").font(.headline)
                 Button(action: { model.openWhatsNew() }) {
-                    Text(AppInfo.displayVersion)
-                        .font(.caption2.monospaced())
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 1)
-                        .background(.quaternary, in: RoundedRectangle(cornerRadius: 3))
+                    HStack(spacing: 4) {
+                        Text(AppInfo.displayVersion)
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(.quaternary, in: RoundedRectangle(cornerRadius: 3))
+                        if model.whatsNewUnread {
+                            Text("New")
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1)
+                                .background(.tint, in: Capsule())
+                        }
+                    }
                 }
                 .buttonStyle(.plain)
-                .help("What's new in \(AppInfo.displayVersion)")
+                .help(
+                    model.whatsNewUnread
+                        ? "See what changed in \(AppInfo.displayVersion)"
+                        : "What's new in \(AppInfo.displayVersion)")
                 Spacer()
                 Text("\(model.forwards.count) saved · \(model.runningCount) running")
                     .font(.caption).foregroundStyle(.secondary)
@@ -329,7 +342,7 @@ struct ForwardRow: View {
             .buttonStyle(.borderless)
             .help(buttonIcon(s.run) == "stop.circle" ? "Stop" : "Start")
             Button(action: { model.share(forward) }) {
-                Image(systemName: "square.and.arrow.up")
+                Image(systemName: "square.on.square")
             }
             .buttonStyle(.borderless).help("Copy as JSON to share")
             if !forward.isTemporary {

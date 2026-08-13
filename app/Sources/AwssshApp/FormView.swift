@@ -34,12 +34,24 @@ struct FormView: View {
                 Button("Test") { model.testForm(draft) }
                     .disabled(model.testing != nil)
                     .help("Check the profile, the instance and its SSM agent without connecting")
+                if draft.isTemporary {
+                    Button(action: paste) {
+                        Image(systemName: "doc.on.clipboard")
+                    }
+                    .help("Fill the form from JSON on the clipboard")
+                }
                 Spacer()
                 Button(draft.isTemporary ? "Connect" : "Save") { model.saveForm(draft) }
                     .keyboardShortcut(.defaultAction)
             }
         }
         .onAppear { hexText = draft.color }
+    }
+
+    private func paste() {
+        guard let merged = model.pasteIntoForm(draft) else { return }
+        draft = merged
+        hexText = merged.color
     }
 
     @ViewBuilder private var testLine: some View {

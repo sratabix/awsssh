@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.0.5
+
+- Quick connect can paste a copied forward into the form and start from there.
+- What's new no longer opens itself. The version in the panel is badged until you read it.
+- What's new lists every release, not just the latest one.
+
 ## v1.0.4
 
 - What's new no longer replays every release ever written after a local build has run.
