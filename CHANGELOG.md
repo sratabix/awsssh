@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.0.6
+
+- Pressing Ctrl-C in a shell session no longer ends the session five seconds later.
+
 ## v1.0.5
 
 - Quick connect can paste a copied forward into the form and start from there.

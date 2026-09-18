@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"syscall"
 	"time"
 
@@ -48,14 +49,23 @@ func Available() error {
 }
 
 func (s *Starter) StartShell(ctx context.Context, instanceID string) error {
-	cmd, err := s.command(ctx, instanceID, "", nil)
+	args, err := s.pluginArgs(ctx, instanceID, "", nil)
 	if err != nil {
 		return err
 	}
+
+	runCtx, stop := shellContext(ctx)
+	defer stop()
+
+	cmd := pluginCommand(runCtx, args)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+func shellContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(context.WithoutCancel(ctx), syscall.SIGTERM)
 }
 
 func forwardDocument(f Forward) (string, map[string][]string) {
@@ -83,14 +93,25 @@ func pluginPayload(target, document string, parameters map[string][]string) map[
 
 func (s *Starter) ForwardCommand(ctx context.Context, instanceID string, f Forward) (*exec.Cmd, error) {
 	document, parameters := forwardDocument(f)
-	return s.command(ctx, instanceID, document, parameters)
+	args, err := s.pluginArgs(ctx, instanceID, document, parameters)
+	if err != nil {
+		return nil, err
+	}
+	return pluginCommand(ctx, args), nil
 }
 
-func (s *Starter) command(
+func pluginCommand(ctx context.Context, args []string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, pluginBinary, args...)
+	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGINT) }
+	cmd.WaitDelay = 5 * time.Second
+	return cmd
+}
+
+func (s *Starter) pluginArgs(
 	ctx context.Context,
 	target, document string,
 	parameters map[string][]string,
-) (*exec.Cmd, error) {
+) ([]string, error) {
 	params := pluginPayload(target, document, parameters)
 	input := &ssm.StartSessionInput{Target: aws.String(target)}
 	if document != "" {
@@ -119,15 +140,12 @@ func (s *Starter) command(
 	}
 
 	endpoint := fmt.Sprintf("https://ssm.%s.amazonaws.com", s.region)
-	cmd := exec.CommandContext(ctx, pluginBinary,
+	return []string{
 		string(response),
 		s.region,
 		"StartSession",
 		s.profile,
 		string(paramsJSON),
 		endpoint,
-	)
-	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGINT) }
-	cmd.WaitDelay = 5 * time.Second
-	return cmd, nil
+	}, nil
 }

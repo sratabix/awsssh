@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -276,6 +277,37 @@ func TestDocumentNamesAreTheAWSOwnedOnes(t *testing.T) {
 	}
 	if docToRemoteHost != "AWS-StartPortForwardingSessionToRemoteHost" {
 		t.Errorf("docToRemoteHost = %q; this is an AWS-owned document name", docToRemoteHost)
+	}
+}
+
+func TestCancellingTheParentDoesNotEndAShellSession(t *testing.T) {
+	parent, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	shell, stop := shellContext(parent)
+	defer stop()
+
+	cancel()
+
+	select {
+	case <-shell.Done():
+		t.Fatal("a Ctrl-C at the terminal reaches awsssh as well; it must not tear down the session")
+	default:
+	}
+}
+
+func TestAForwardStillFollowsItsContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cmd := pluginCommand(ctx, []string{"payload"})
+	cancel()
+
+	if cmd.Cancel == nil {
+		t.Error("a forward is stopped by cancelling its context")
+	}
+	if cmd.WaitDelay == 0 {
+		t.Error("a plugin that ignores the interrupt must still be reaped")
+	}
+	if got := cmd.Args[1:]; !slices.Equal(got, []string{"payload"}) {
+		t.Errorf("args = %v, want the plugin arguments", got)
 	}
 }
 
