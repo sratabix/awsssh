@@ -567,20 +567,26 @@ func TestASecondStartWhileTheFirstIsStillRunningIsDropped(t *testing.T) {
 	isolateAWS(t)
 
 	mgr := NewManager(t.Context(), NewProvider(t.Context()))
-	spec := Spec{Profile: "ghost", Region: "eu-west-1", Instance: "db", LocalPort: "1", RemotePort: "2"}
+	_, cancel := context.WithCancel(t.Context())
+	defer cancel()
 
-	mgr.Start(1, spec)
-	mgr.Start(1, spec)
+	mgr.mu.Lock()
+	mgr.cancels[1] = cancel
+	mgr.mu.Unlock()
 
-	first := awaitEvent(t, mgr)
-	if first.ID != 1 || first.Kind != Exited {
-		t.Fatalf("got %+v, want an exited event for id 1", first)
-	}
+	mgr.Start(1, Spec{Profile: "ghost", Region: "eu-west-1", Instance: "db", LocalPort: "1", RemotePort: "2"})
 
 	select {
 	case extra := <-mgr.Events():
-		t.Errorf("got a second event %+v; the re-entrancy guard must drop the duplicate Start", extra)
+		t.Errorf("got %+v; the re-entrancy guard must drop a Start for a running id", extra)
 	case <-time.After(300 * time.Millisecond):
+	}
+
+	mgr.mu.Lock()
+	_, stillTracked := mgr.cancels[1]
+	mgr.mu.Unlock()
+	if !stillTracked {
+		t.Error("a running forward must keep its place in the cancel map")
 	}
 }
 
