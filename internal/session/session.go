@@ -100,6 +100,19 @@ func (s *Starter) ForwardCommand(ctx context.Context, instanceID string, f Forwa
 	return pluginCommand(ctx, args), nil
 }
 
+func (s *Starter) StartForward(ctx context.Context, instanceID string, f Forward) error {
+	cmd, err := s.ForwardCommand(ctx, instanceID, f)
+	if err != nil {
+		return err
+	}
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil && ctx.Err() == nil {
+		return err
+	}
+	return nil
+}
+
 func pluginCommand(ctx context.Context, args []string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, pluginBinary, args...)
 	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGINT) }

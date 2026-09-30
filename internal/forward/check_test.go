@@ -161,7 +161,7 @@ func TestAReservedLocalPortIsRefusedBeforeAnythingElse(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root may bind a reserved port")
 	}
-	err := checkLocalPort("11")
+	err := CheckLocalPort("11")
 	if err == nil {
 		t.Fatal("port 11 needs root; a test that passes here is the bug this covers")
 	}
@@ -181,7 +181,7 @@ func TestALocalPortHeldBySomethingElseIsRefused(t *testing.T) {
 		t.Fatal("want a TCP listener")
 	}
 
-	err = checkLocalPort(strconv.Itoa(addr.Port))
+	err = CheckLocalPort(strconv.Itoa(addr.Port))
 	if err == nil {
 		t.Fatal("a port already listening cannot be forwarded to")
 	}
@@ -195,16 +195,16 @@ func TestAFreeLocalPortPassesAndIsGivenBack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := checkLocalPort(port); err != nil {
+	if err := CheckLocalPort(port); err != nil {
 		t.Fatalf("a free port must pass: %v", err)
 	}
-	if err := checkLocalPort(port); err != nil {
+	if err := CheckLocalPort(port); err != nil {
 		t.Fatalf("the check must not keep the port it just bound: %v", err)
 	}
 }
 
 func TestNoLocalPortIsNotAFailure(t *testing.T) {
-	if err := checkLocalPort(""); err != nil {
+	if err := CheckLocalPort(""); err != nil {
 		t.Errorf("a test of a running forward sends no local port: %v", err)
 	}
 }

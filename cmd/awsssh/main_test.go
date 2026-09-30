@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+
+	"github.com/sratabix/awsssh/internal/session"
 )
 
 func execHelp(t *testing.T, args ...string) (string, error) {
@@ -24,7 +26,7 @@ func execHelp(t *testing.T, args ...string) (string, error) {
 
 func TestRootCommandExposesTheDocumentedFlags(t *testing.T) {
 	cmd := rootCmd()
-	for _, name := range []string{"region", "profile", "instance", "debug"} {
+	for _, name := range []string{"region", "profile", "instance", "forward", "debug"} {
 		if cmd.Flags().Lookup(name) == nil {
 			t.Errorf("missing --%s flag", name)
 		}
@@ -32,11 +34,68 @@ func TestRootCommandExposesTheDocumentedFlags(t *testing.T) {
 	if cmd.Flags().ShorthandLookup("d") == nil {
 		t.Error("--debug should have a -d shorthand")
 	}
+	if f := cmd.Flags().ShorthandLookup("L"); f == nil || f.Name != "forward" {
+		t.Error("--forward should have an ssh-style -L shorthand")
+	}
+}
+
+func TestParseForwardAcceptsBothShapes(t *testing.T) {
+	cases := map[string]session.Forward{
+		"8080:80":                     {LocalPort: "8080", RemotePort: "80"},
+		"5432:db.internal:5432":       {LocalPort: "5432", Host: "db.internal", RemotePort: "5432"},
+		"05432:10.0.0.5:05432":        {LocalPort: "5432", Host: "10.0.0.5", RemotePort: "5432"},
+		" 15432 : db.internal : 5432": {LocalPort: "15432", Host: "db.internal", RemotePort: "5432"},
+	}
+	for spec, want := range cases {
+		got, err := parseForward(spec)
+		if err != nil {
+			t.Errorf("parseForward(%q) = %v", spec, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("parseForward(%q) = %+v, want %+v", spec, got, want)
+		}
+	}
+}
+
+func TestParseForwardRejectsMalformedSpecs(t *testing.T) {
+	for _, spec := range []string{
+		"", "8080", "a:b:c:d", "8080:", ":80", "0:80", "8080:65536", "x:80",
+		"8080::80", "8080: :80", "-1:80", "8080:host:port",
+	} {
+		_, err := parseForward(spec)
+		if err == nil {
+			t.Errorf("parseForward(%q) should fail", spec)
+			continue
+		}
+		if !strings.Contains(err.Error(), "--forward") {
+			t.Errorf("parseForward(%q) = %q, want the flag named", spec, err)
+		}
+	}
+}
+
+func TestAnEmptyForwardIsRejectedRatherThanOpeningAShell(t *testing.T) {
+	_, err := execHelp(t, "--forward", "")
+	if err == nil || !strings.Contains(err.Error(), "--forward") {
+		t.Errorf("an explicit empty --forward should be a parse error, got %v", err)
+	}
+}
+
+func TestForwardSummaryNamesWhereTheTrafficGoes(t *testing.T) {
+	onInstance := forwardSummary(session.Forward{LocalPort: "8080", RemotePort: "80"}, "web", "i-1")
+	if want := "forwarding localhost:8080 to port 80 on web (i-1)"; onInstance != want {
+		t.Errorf("got %q, want %q", onInstance, want)
+	}
+	viaHost := forwardSummary(
+		session.Forward{LocalPort: "5432", Host: "db.internal", RemotePort: "5432"}, "bastion", "i-2")
+	if want := "forwarding localhost:5432 to db.internal:5432 via bastion (i-2)"; viaHost != want {
+		t.Errorf("got %q, want %q", viaHost, want)
+	}
 }
 
 func TestRootCommandFlagsDefaultToEmpty(t *testing.T) {
 	cmd := rootCmd()
-	for _, name := range []string{"region", "profile", "instance"} {
+	for _, name := range []string{"region", "profile", "instance", "forward"} {
 		if got := cmd.Flags().Lookup(name).DefValue; got != "" {
 			t.Errorf("--%s defaults to %q, want empty", name, got)
 		}
@@ -71,7 +130,7 @@ func TestHelpMentionsEveryFlagAndStaysShort(t *testing.T) {
 	if err != nil {
 		t.Fatalf("--help returned %v", err)
 	}
-	for _, want := range []string{"--region", "--profile", "--instance", "--debug"} {
+	for _, want := range []string{"--region", "--profile", "--instance", "--forward", "--debug"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("help does not mention %s", want)
 		}

@@ -19,7 +19,7 @@ func localPortError(port string, err error) error {
 	}
 }
 
-func checkLocalPort(port string) error {
+func CheckLocalPort(port string) error {
 	if port == "" {
 		return nil
 	}

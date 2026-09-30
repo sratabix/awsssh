@@ -6,13 +6,19 @@ import (
 	"os"
 
 	"github.com/sratabix/awsssh/internal/awsx"
+	"github.com/sratabix/awsssh/internal/forward"
 	"github.com/sratabix/awsssh/internal/session"
 	"github.com/sratabix/awsssh/internal/tui"
 )
 
-func run(ctx context.Context, region, profile, instance string) error {
+func run(ctx context.Context, region, profile, instance string, fwd *session.Forward) error {
 	if err := session.Available(); err != nil {
 		return err
+	}
+	if fwd != nil {
+		if err := forward.CheckLocalPort(fwd.LocalPort); err != nil {
+			return err
+		}
 	}
 
 	client, err := awsx.New(ctx, profile, region)
@@ -36,8 +42,21 @@ func run(ctx context.Context, region, profile, instance string) error {
 	}
 
 	starter := session.New(client.Config(), client.Region, profile)
+	if fwd != nil {
+		fmt.Fprintf(os.Stderr, "awsssh: %s\n", forwardSummary(*fwd, target.Key(), target.InstanceID))
+		return starter.StartForward(ctx, target.InstanceID, *fwd)
+	}
 	fmt.Fprintf(os.Stderr, "awsssh: connecting to %s (%s)\n", target.Key(), target.InstanceID)
 	return starter.StartShell(ctx, target.InstanceID)
+}
+
+func forwardSummary(f session.Forward, name, instanceID string) string {
+	if f.Host == "" {
+		return fmt.Sprintf("forwarding localhost:%s to port %s on %s (%s)",
+			f.LocalPort, f.RemotePort, name, instanceID)
+	}
+	return fmt.Sprintf("forwarding localhost:%s to %s:%s via %s (%s)",
+		f.LocalPort, f.Host, f.RemotePort, name, instanceID)
 }
 
 func pickInstance(ctx context.Context, client *awsx.Client, filter string) (*awsx.Instance, error) {

@@ -9,7 +9,7 @@ import (
 )
 
 func (m *Manager) Check(ctx context.Context, s Spec) (string, error) {
-	if err := checkLocalPort(s.LocalPort); err != nil {
+	if err := CheckLocalPort(s.LocalPort); err != nil {
 		return "", err
 	}
 	if err := session.Available(); err != nil {
