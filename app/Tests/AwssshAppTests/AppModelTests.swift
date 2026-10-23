@@ -1418,6 +1418,152 @@ final class AppModelTests: XCTestCase {
             "a no-op reconnect must not block the next real one")
     }
 
+    @MainActor private func retrying() -> AppModel {
+        let m = model()
+        m.autoRetry = true
+        m.saveForm(forward(1, name: "live"))
+        return m
+    }
+
+    private func dropped(_ id: Int = 1, retryable: Bool? = true) -> HelperMessage {
+        HelperMessage(event: "exited", id: id, error: "Your session has been terminated.", retryable: retryable)
+    }
+
+    @MainActor func testADroppedTunnelWaitsAndThenRestarts() {
+        let m = retrying()
+        let t = Date()
+        m.handle(HelperMessage(event: "started", id: 1), now: t)
+
+        m.handle(dropped(), now: t.addingTimeInterval(600))
+
+        XCTAssertEqual(m.states[1]?.run, .reconnecting)
+        XCTAssertEqual(m.states[1]?.detail, "(attempt 1)")
+        XCTAssertEqual(m.retries[1]?.due, t.addingTimeInterval(600 + AppModel.retryDelays[0]))
+
+        m.runDueRetries(now: t.addingTimeInterval(601))
+        XCTAssertNotNil(m.retries[1], "nothing fires before it is due")
+
+        m.runDueRetries(now: t.addingTimeInterval(600 + AppModel.retryDelays[0]))
+        XCTAssertNil(m.retries[1])
+        XCTAssertEqual(m.states[1]?.run, .reconnecting, "the start is in flight")
+
+        m.handle(HelperMessage(event: "started", id: 1))
+        XCTAssertEqual(m.states[1]?.run, .running)
+    }
+
+    @MainActor func testARealErrorIsNeverRetried() {
+        let m = retrying()
+        m.handle(HelperMessage(event: "started", id: 1))
+
+        m.handle(dropped(retryable: nil))
+
+        XCTAssertEqual(m.states[1]?.run, .error)
+        XCTAssertEqual(m.states[1]?.error, "Your session has been terminated.")
+        XCTAssertTrue(m.retries.isEmpty)
+    }
+
+    @MainActor func testNothingIsRetriedWithTheSettingOff() {
+        let m = model()
+        m.saveForm(forward(1))
+        m.handle(HelperMessage(event: "started", id: 1))
+
+        m.handle(dropped())
+
+        XCTAssertEqual(m.states[1]?.run, .error)
+        XCTAssertTrue(m.retries.isEmpty)
+    }
+
+    @MainActor func testRetriesNeverGiveUpAndHoldAtTheLongestDelay() {
+        let m = retrying()
+        var t = Date()
+        let attempts = AppModel.retryDelays.count + 3
+        for attempt in 1...attempts {
+            m.handle(dropped(), now: t)
+            XCTAssertEqual(m.states[1]?.run, .reconnecting)
+            XCTAssertEqual(m.states[1]?.detail, "(attempt \(attempt))")
+            let delay = AppModel.retryDelays[min(attempt - 1, AppModel.retryDelays.count - 1)]
+            XCTAssertEqual(m.retries[1]?.due, t.addingTimeInterval(delay))
+            t = t.addingTimeInterval(delay)
+            m.runDueRetries(now: t)
+        }
+    }
+
+    @MainActor func testAQuickDropAfterARetryKeepsCounting() {
+        let m = retrying()
+        let t = Date()
+        m.handle(dropped(), now: t)
+        m.runDueRetries(now: t.addingTimeInterval(AppModel.retryDelays[0]))
+        m.handle(HelperMessage(event: "started", id: 1), now: t.addingTimeInterval(6))
+
+        m.handle(dropped(), now: t.addingTimeInterval(20))
+
+        XCTAssertEqual(m.states[1]?.detail, "(attempt 2)")
+    }
+
+    @MainActor func testAHealthyRunStartsTheCountAgain() {
+        let m = retrying()
+        let t = Date()
+        m.handle(dropped(), now: t)
+        m.runDueRetries(now: t.addingTimeInterval(AppModel.retryDelays[0]))
+        m.handle(HelperMessage(event: "started", id: 1), now: t.addingTimeInterval(6))
+
+        m.handle(dropped(), now: t.addingTimeInterval(6 + AppModel.retryHealthy))
+
+        XCTAssertEqual(m.states[1]?.detail, "(attempt 1)")
+    }
+
+    @MainActor func testStoppingAWaitingRetryStopsAtOnce() {
+        let m = retrying()
+        m.handle(dropped())
+
+        m.toggle(m.forwards[0])
+
+        XCTAssertEqual(m.states[1]?.run, .stopped, "no helper process exists to answer a stop")
+        XCTAssertTrue(m.retries.isEmpty)
+    }
+
+    @MainActor func testTurningTheSettingOffSurfacesTheWaitingError() {
+        let m = retrying()
+        m.handle(dropped())
+
+        m.autoRetry = false
+
+        XCTAssertEqual(m.states[1]?.run, .error)
+        XCTAssertEqual(m.states[1]?.error, "Your session has been terminated.")
+        XCTAssertTrue(m.retries.isEmpty)
+    }
+
+    @MainActor func testARetryWaitsForTheNetworkWithoutSpendingAnAttempt() {
+        let m = retrying()
+        let t = Date()
+        m.handle(dropped(), now: t)
+        m.network.observe(path(false))
+
+        m.runDueRetries(now: t.addingTimeInterval(AppModel.retryDelays[0]))
+
+        XCTAssertNotNil(m.retries[1], "offline, the retry is postponed rather than sent")
+        XCTAssertEqual(m.states[1]?.detail, "(attempt 1)")
+    }
+
+    @MainActor func testAWaitingRetryHoldsItsLocalPort() {
+        let m = retrying()
+        m.saveForm(forward(2, port: "5432", name: "other"))
+        m.handle(dropped())
+
+        m.toggle(m.forwards[1])
+
+        XCTAssertEqual(m.states[2]?.run, .error, "the port is promised to the forward coming back")
+    }
+
+    @MainActor func testDeletingAWaitingForwardCancelsItsRetry() {
+        let m = retrying()
+        m.handle(dropped())
+
+        m.delete(m.forwards[0])
+
+        XCTAssertTrue(m.retries.isEmpty)
+    }
+
     @MainActor func testNothingRunningNeedsNoAttention() {
         let m = model()
         m.saveForm(forward(1))

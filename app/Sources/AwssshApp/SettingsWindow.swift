@@ -22,6 +22,13 @@ struct SettingsView: View {
             }
             Divider()
             setting(
+                "Retry dropped forwards",
+                note: "When a tunnel drops or AWS cannot be reached, Awsssh starts it again. "
+                    + "Errors that need you, such as credentials or a missing instance, still stop it.",
+                isOn: $model.autoRetry
+            )
+            Divider()
+            setting(
                 "Show the AWS SSO sign-in",
                 note: ssoNote,
                 isOn: $model.showSSO

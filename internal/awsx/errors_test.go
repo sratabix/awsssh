@@ -1,8 +1,10 @@
 package awsx
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"testing"
 
@@ -209,5 +211,49 @@ func TestProfileMissingRejectsUnrelatedErrors(t *testing.T) {
 	}
 	if profileMissing(nil) {
 		t.Error("nil is not a missing profile")
+	}
+}
+
+func TestTransientSeparatesTheNetworkFromTheConfiguration(t *testing.T) {
+	offline := &net.DNSError{Err: "no such host", Name: "ec2.eu-west-1.amazonaws.com", IsNotFound: true}
+	dial := &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("network is unreachable")}
+
+	retry := map[string]error{
+		"dns":        fmt.Errorf("operation error EC2: DescribeInstances: %w", offline),
+		"dial":       fmt.Errorf("https response error: %w", dial),
+		"throttling": apiError{code: "ThrottlingException"},
+		"deadline":   fmt.Errorf("operation error SSM: StartSession: %w", context.DeadlineExceeded),
+	}
+	for name, err := range retry {
+		if !Transient(err) {
+			t.Errorf("%s: %v should be retried", name, err)
+		}
+	}
+
+	real := map[string]error{
+		"nil":         nil,
+		"cancelled":   fmt.Errorf("operation error SSM: StartSession: %w", context.Canceled),
+		"permissions": apiError{code: "UnauthorizedOperation"},
+		"no target":   apiError{code: "TargetNotConnected"},
+		"no instance": errors.New(`no instance matched "db" in eu-west-1`),
+	}
+	for name, err := range real {
+		if Transient(err) {
+			t.Errorf("%s: %v must not be retried", name, err)
+		}
+	}
+}
+
+func TestDiagnoseDoesNotCallAnOfflineCredentialRefreshSignedOut(t *testing.T) {
+	awsFiles(t, "[profile corp]\nsso_session = s\n", "")
+
+	offline := &net.DNSError{Err: "no such host", Name: "portal.sso.eu-west-1.amazonaws.com", IsNotFound: true}
+	cause := fmt.Errorf("failed to refresh cached credentials, %w", offline)
+	err := Diagnose(Profile{Name: "corp", Explicit: true}, cause)
+	if strings.Contains(err.Error(), "not signed in") {
+		t.Errorf("offline is not signed out: %s", err)
+	}
+	if !Transient(err) {
+		t.Error("the network failure must survive Diagnose so it can be retried")
 	}
 }

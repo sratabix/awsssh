@@ -38,6 +38,13 @@ final class PreferencesTests: XCTestCase {
         XCTAssertTrue(Preferences.autoSignIn)
     }
 
+    func testAutomaticRetryIsOffUntilItIsAskedFor() {
+        XCTAssertFalse(Preferences.autoRetry, "an error should stay put unless asked otherwise")
+
+        Preferences.autoRetry = true
+        XCTAssertTrue(Preferences.autoRetry)
+    }
+
     func testTheChoiceOutlivesTheObject() {
         Preferences.showSSO = false
         XCTAssertFalse(

@@ -1,10 +1,14 @@
 package awsx
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/smithy-go"
 )
@@ -44,6 +48,19 @@ func needsLogin(err error) bool {
 	return false
 }
 
+var transient = retry.IsErrorRetryables(retry.DefaultRetryables)
+
+func Transient(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return false
+	}
+	var dns *net.DNSError
+	if errors.As(err, &dns) {
+		return true
+	}
+	return transient.IsErrorRetryable(err) == aws.TrueTernary
+}
+
 func Diagnose(profile Profile, err error) error {
 	if err == nil {
 		return nil
@@ -53,7 +70,7 @@ func Diagnose(profile Profile, err error) error {
 		return fmt.Errorf("AWS profile %q does not exist%s", profile.Name, profileList())
 	}
 
-	if needsLogin(err) {
+	if needsLogin(err) && !Transient(err) {
 		return fmt.Errorf("not signed in to AWS profile %q%s\n  %s",
 			profile.Name, defaulted(profile), loginHint(profile.Name))
 	}

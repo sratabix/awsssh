@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.0.8
+
+- Retry dropped forwards automatically, from Settings.
+
+## v1.0.7
+
+- The CLI can forward a port with `-L`, like ssh.
+
 ## v1.0.6
 
 - Pressing Ctrl-C in a shell session no longer ends the session five seconds later.

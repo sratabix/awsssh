@@ -3,6 +3,7 @@ import Foundation
 enum Preferences {
     static let showSSOKey = "showSSO"
     static let autoSignInKey = "autoSignIn"
+    static let autoRetryKey = "autoRetry"
     static let lastSeenVersionKey = "lastSeenVersion"
 
     nonisolated(unsafe) static var store: UserDefaults = .standard
@@ -17,6 +18,11 @@ enum Preferences {
     static var autoSignIn: Bool {
         get { store.object(forKey: autoSignInKey) as? Bool ?? false }
         set { store.set(newValue, forKey: autoSignInKey) }
+    }
+
+    static var autoRetry: Bool {
+        get { store.object(forKey: autoRetryKey) as? Bool ?? false }
+        set { store.set(newValue, forKey: autoRetryKey) }
     }
 
     static var lastSeenVersion: String {

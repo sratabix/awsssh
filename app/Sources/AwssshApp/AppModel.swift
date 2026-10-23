@@ -7,6 +7,8 @@ final class AppModel: ObservableObject {
     static let loginPollInterval: TimeInterval = 60
     static let loginCheckInterval: TimeInterval = 300
     static let autoSignInBackoff: TimeInterval = 900
+    static let retryDelays: [TimeInterval] = [5, 15, 30, 60, 120]
+    static let retryHealthy: TimeInterval = 60
 
     @Published var forwards: [Forward] = []
     @Published private(set) var temporaries: [Forward] = []
@@ -42,6 +44,12 @@ final class AppModel: ObservableObject {
     @Published var autoSignIn = Preferences.autoSignIn {
         didSet { Preferences.autoSignIn = autoSignIn }
     }
+    @Published var autoRetry = Preferences.autoRetry {
+        didSet {
+            Preferences.autoRetry = autoRetry
+            if !autoRetry { abandonRetries() }
+        }
+    }
     @Published var collapsedGroups = Preferences.collapsedGroups {
         didSet { Preferences.collapsedGroups = collapsedGroups }
     }
@@ -69,6 +77,9 @@ final class AppModel: ObservableObject {
     private var loginPoll: Timer?
     private var lastChecked: [String: Date] = [:]
     private var lastAutoSignIn: [String: Date] = [:]
+    private(set) var retries: [Int: PendingRetry] = [:]
+    private var retryAttempts: [Int: Int] = [:]
+    private var retryTimer: Timer?
 
     init(attached: Bool = true) {
         self.attached = attached
@@ -141,6 +152,7 @@ final class AppModel: ObservableObject {
 
     deinit {
         loginPoll?.invalidate()
+        retryTimer?.invalidate()
         if let wakeObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
         }
@@ -435,6 +447,16 @@ final class AppModel: ObservableObject {
     }
 
     func toggle(_ forward: Forward) {
+        retryAttempts[forward.id] = nil
+        if cancelRetry(forward.id) {
+            update(forward.id) {
+                $0.run = .stopped
+                $0.detail = ""
+                $0.since = nil
+            }
+            forget(forward.id)
+            return
+        }
         switch state(for: forward).run {
         case .running, .starting, .reconnecting:
             awaitingRestart.remove(forward.id)
@@ -534,6 +556,73 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private func scheduleRetry(_ id: Int, error: String, ran: TimeInterval?, now: Date) -> Bool {
+        guard autoRetry else { return false }
+        if let ran, ran >= Self.retryHealthy { retryAttempts[id] = nil }
+        let attempt = retryAttempts[id] ?? 0
+        let delay = Self.retryDelays[min(attempt, Self.retryDelays.count - 1)]
+
+        retryAttempts[id] = attempt + 1
+        retries[id] = PendingRetry(due: now.addingTimeInterval(delay), error: error)
+        update(id) {
+            $0.run = .reconnecting
+            $0.detail = "(attempt \(attempt + 1))"
+            $0.error = ""
+            $0.since = nil
+        }
+        armRetryTimer(now: now)
+        return true
+    }
+
+    func runDueRetries(now: Date = Date()) {
+        for (id, pending) in retries where pending.due <= now {
+            guard network.reachable else {
+                retries[id]?.due = now.addingTimeInterval(Self.retryDelays[0])
+                continue
+            }
+            retries[id] = nil
+            guard let forward = entries.first(where: { $0.id == id }) else {
+                retryAttempts[id] = nil
+                continue
+            }
+            sendStart(forward)
+        }
+        armRetryTimer(now: now)
+    }
+
+    @discardableResult
+    private func cancelRetry(_ id: Int) -> Bool {
+        guard retries.removeValue(forKey: id) != nil else { return false }
+        armRetryTimer(now: Date())
+        return true
+    }
+
+    private func abandonRetries() {
+        let pending = retries
+        retries = [:]
+        retryAttempts = [:]
+        armRetryTimer(now: Date())
+        for (id, retry) in pending {
+            update(id) {
+                $0.run = .error
+                $0.error = retry.error
+                $0.detail = ""
+            }
+        }
+    }
+
+    private func armRetryTimer(now: Date) {
+        retryTimer?.invalidate()
+        retryTimer = nil
+        guard attached, let next = retries.values.map(\.due).min() else { return }
+        retryTimer = Timer.scheduledTimer(
+            withTimeInterval: max(next.timeIntervalSince(now), 0),
+            repeats: false
+        ) { [weak self] _ in
+            Task { @MainActor in self?.runDueRetries() }
+        }
+    }
+
     func beginAdd() {
         pendingDelete = nil
         editing = Forward(id: nextID)
@@ -612,6 +701,8 @@ final class AppModel: ObservableObject {
 
     private func forget(_ id: Int) {
         guard id < 0 else { return }
+        cancelRetry(id)
+        retryAttempts[id] = nil
         temporaries.removeAll { $0.id == id }
         states[id] = nil
         if expandedError == id { expandedError = nil }
@@ -634,6 +725,8 @@ final class AppModel: ObservableObject {
 
     func delete(_ forward: Forward) {
         awaitingRestart.remove(forward.id)
+        cancelRetry(forward.id)
+        retryAttempts[forward.id] = nil
         helper.send(HelperCommand(cmd: "stop", id: forward.id))
         if forward.isTemporary {
             forget(forward.id)
@@ -724,13 +817,15 @@ final class AppModel: ObservableObject {
                 }
                 let requested = states[id]?.run == .stopping
                 if let e = msg.error, !e.isEmpty, !requested {
-                    let ran = states[id]?.since.map {
-                        "ran for \(EntryState.uptimeLabel(now.timeIntervalSince($0)))"
+                    let ran = states[id]?.since.map { now.timeIntervalSince($0) }
+                    if msg.retryable == true, scheduleRetry(id, error: e, ran: ran, now: now) {
+                        return
                     }
+                    let detail = ran.map { "ran for \(EntryState.uptimeLabel($0))" }
                     update(id) {
                         $0.run = .error
                         $0.error = e
-                        $0.detail = ran ?? ""
+                        $0.detail = detail ?? ""
                         $0.since = nil
                     }
                 } else {

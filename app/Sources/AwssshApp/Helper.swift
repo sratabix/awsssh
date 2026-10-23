@@ -30,6 +30,7 @@ struct HelperMessage: Codable {
     var id: Int?
     var detail: String?
     var error: String?
+    var retryable: Bool?
     var profiles: [String]?
     var logins: [HelperLogin]?
     var state: String?

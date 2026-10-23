@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/sratabix/awsssh/internal/awsx"
 	"github.com/sratabix/awsssh/internal/session"
 )
 
@@ -26,11 +28,14 @@ const (
 	Exited  EventKind = "exited"
 )
 
+const settledAfter = 10 * time.Second
+
 type Event struct {
-	ID     int
-	Kind   EventKind
-	Detail string
-	Err    string
+	ID        int
+	Kind      EventKind
+	Detail    string
+	Err       string
+	Retryable bool
 }
 
 type Manager struct {
@@ -105,12 +110,13 @@ func (m *Manager) run(ctx context.Context, id int, s Spec) Event {
 		return exitEvent(id, err)
 	}
 	m.emit(Event{ID: id, Kind: Started, Detail: "localhost:" + s.LocalPort})
+	began := time.Now()
 
 	werr := cmd.Wait()
 	if ctx.Err() != nil {
 		return Event{ID: id, Kind: Exited}
 	}
-	return exitEvent(id, endedReason(werr, errs.String(), out.String()))
+	return droppedEvent(id, endedReason(werr, errs.String(), out.String()), time.Since(began))
 }
 
 func (m *Manager) Stop(id int) {
@@ -140,7 +146,14 @@ func exitEvent(id int, err error) Event {
 	ev := Event{ID: id, Kind: Exited}
 	if err != nil && !errors.Is(err, context.Canceled) {
 		ev.Err = err.Error()
+		ev.Retryable = awsx.Transient(err)
 	}
+	return ev
+}
+
+func droppedEvent(id int, err error, ran time.Duration) Event {
+	ev := exitEvent(id, err)
+	ev.Retryable = ev.Err != "" && ran >= settledAfter
 	return ev
 }
 

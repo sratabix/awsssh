@@ -54,14 +54,15 @@ type loginInfo struct {
 }
 
 type message struct {
-	Event    string      `json:"event"`
-	ID       int         `json:"id,omitempty"`
-	Detail   string      `json:"detail,omitempty"`
-	Error    string      `json:"error,omitempty"`
-	Profiles []string    `json:"profiles,omitempty"`
-	Logins   []loginInfo `json:"logins,omitempty"`
-	State    string      `json:"state,omitempty"`
-	URL      string      `json:"url,omitempty"`
+	Event     string      `json:"event"`
+	ID        int         `json:"id,omitempty"`
+	Detail    string      `json:"detail,omitempty"`
+	Error     string      `json:"error,omitempty"`
+	Retryable bool        `json:"retryable,omitempty"`
+	Profiles  []string    `json:"profiles,omitempty"`
+	Logins    []loginInfo `json:"logins,omitempty"`
+	State     string      `json:"state,omitempty"`
+	URL       string      `json:"url,omitempty"`
 }
 
 type output struct {
@@ -93,10 +94,11 @@ func serve(ctx context.Context, in io.Reader, w io.Writer, mgr *forward.Manager)
 		defer close(done)
 		for ev := range mgr.Events() {
 			out.send(message{
-				Event:  string(ev.Kind),
-				ID:     ev.ID,
-				Detail: ev.Detail,
-				Error:  ev.Err,
+				Event:     string(ev.Kind),
+				ID:        ev.ID,
+				Detail:    ev.Detail,
+				Error:     ev.Err,
+				Retryable: ev.Retryable,
 			})
 		}
 	}()

@@ -123,6 +123,14 @@ final class HelperProtocolTests: XCTestCase {
         XCTAssertEqual(message.error, "the session ended on its own")
     }
 
+    func testARetryableExitDecodesTheFlag() throws {
+        let message = try decode(#"{"event":"exited","id":4,"error":"dial tcp: i/o timeout","retryable":true}"#)
+        XCTAssertEqual(message.retryable, true)
+        XCTAssertNil(
+            try decode(#"{"event":"exited","id":4,"error":"no instance matched"}"#).retryable,
+            "omitempty drops false, so a real error arrives with no flag at all")
+    }
+
     func testABareExitedMessageDecodes() throws {
         let message = try decode(#"{"event":"exited","id":4}"#)
         XCTAssertEqual(message.event, "exited")

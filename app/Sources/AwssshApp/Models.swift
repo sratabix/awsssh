@@ -84,6 +84,11 @@ enum ReconnectReason: String {
     case network = "after a network change"
 }
 
+struct PendingRetry: Equatable {
+    var due: Date
+    var error: String
+}
+
 enum RunState: Equatable {
     case stopped, starting, running, reconnecting, stopping, error
 }

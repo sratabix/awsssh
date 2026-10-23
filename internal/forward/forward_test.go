@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -168,6 +169,33 @@ func TestExitEventKeepsARealError(t *testing.T) {
 
 	if got := exitEvent(6, nil); got.Err != "" {
 		t.Errorf("a clean exit carries no error, got %q", got.Err)
+	}
+}
+
+func TestExitEventMarksOnlyANetworkFailureRetryable(t *testing.T) {
+	offline := &net.DNSError{Err: "no such host", Name: "ssm.eu-west-1.amazonaws.com", IsNotFound: true}
+	if ev := exitEvent(7, fmt.Errorf("start session: %w", offline)); !ev.Retryable {
+		t.Errorf("a failure to reach AWS should be retryable: %+v", ev)
+	}
+	if ev := exitEvent(8, errors.New(`no instance matched "db" in eu-west-1`)); ev.Retryable {
+		t.Errorf("a missing instance needs the user: %+v", ev)
+	}
+	if ev := exitEvent(9, fmt.Errorf("start session: %w", context.Canceled)); ev.Retryable {
+		t.Errorf("a cancellation is not an error at all: %+v", ev)
+	}
+}
+
+func TestDroppedEventIsRetryableOnlyOnceTheTunnelHadSettled(t *testing.T) {
+	ended := errors.New("Your session has been terminated.")
+
+	if ev := droppedEvent(1, ended, settledAfter); !ev.Retryable || ev.Err == "" {
+		t.Errorf("a tunnel that ran and then dropped should be retried: %+v", ev)
+	}
+	if ev := droppedEvent(2, errors.New("listen tcp 127.0.0.1:5432: bind: address already in use"), time.Second); ev.Retryable {
+		t.Errorf("a plugin that dies at once is a real error: %+v", ev)
+	}
+	if ev := droppedEvent(3, nil, time.Hour); ev.Retryable {
+		t.Errorf("a clean exit has nothing to retry: %+v", ev)
 	}
 }
 
